@@ -1,4 +1,4 @@
-const CACHE = 'janus-shell-v1';
+const CACHE = 'janus-shell-v2';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
@@ -16,7 +16,11 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
+  if (
+    request.method !== 'GET'
+    || url.pathname.startsWith('/api/')
+    || url.pathname === '/health'
+  ) return;
 
   event.respondWith(
     fetch(request)
