@@ -7,12 +7,15 @@ const transcript = document.querySelector('#transcript');
 const command = document.querySelector('#command');
 const sendButton = document.querySelector('#sendButton');
 const pauseButton = document.querySelector('#pauseButton');
+const stopButton = document.querySelector('#stopButton');
 const clearButton = document.querySelector('#clearButton');
 
 let currentRunId = null;
+let currentRunActive = false;
 let paused = false;
 let listening = false;
 let recognition = null;
+let events = null;
 
 function setConnection(online) {
   connection.classList.toggle('online', online);
@@ -40,7 +43,18 @@ function eventState(type) {
   if (type.includes('failed')) return 'error';
   if (type.includes('blocked') || type.includes('approval')) return 'alert';
   if (type.includes('completed') || type === 'artifact.updated') return 'done';
+  if (type.includes('cancelled')) return 'alert';
   return 'active';
+}
+
+function setRunControls(active) {
+  currentRunActive = active;
+  pauseButton.disabled = !active;
+  stopButton.disabled = !active;
+  if (!active) {
+    paused = false;
+    pauseButton.textContent = 'Pausar';
+  }
 }
 
 function renderEvent(event) {
@@ -62,24 +76,50 @@ function renderEvent(event) {
   if (event.type === 'run.heard') setPresence('Escuchado', 'Te escuché. Empiezo ahora.');
   if (event.type === 'run.started' || event.type === 'run.step.started') setPresence('Trabajando', event.summary);
   if (event.type === 'tool.progress') setPresence('Procesando', event.summary);
-  if (event.type === 'run.paused') setPresence('Pausado', 'La ejecución está detenida, pero la sesión sigue viva.');
-  if (event.type === 'run.resumed') setPresence('Trabajando', 'Continuando desde el punto anterior.');
+  if (event.type === 'run.paused') {
+    paused = true;
+    pauseButton.textContent = 'Continuar';
+    setPresence('Pausado', 'La ejecución está detenida, pero la sesión sigue viva.');
+  }
+  if (event.type === 'run.resumed') {
+    paused = false;
+    pauseButton.textContent = 'Pausar';
+    setPresence('Trabajando', 'Continuando desde el punto anterior.');
+  }
   if (event.type === 'run.completed') {
     setPresence('Terminado', 'Objetivo completado.');
-    pauseButton.disabled = true;
+    setRunControls(false);
+  }
+  if (event.type === 'run.cancelled') {
+    setPresence('Detenido', 'Ejecución detenida por tu orden.');
+    setRunControls(false);
   }
   if (event.type === 'run.failed' || event.type === 'run.blocked') {
     setPresence('Necesita atención', event.summary);
+    setRunControls(false);
   }
 }
 
-const events = new EventSource('/api/events');
-events.onopen = () => setConnection(true);
-events.onerror = () => setConnection(false);
-events.onmessage = (message) => {
-  try { renderEvent(JSON.parse(message.data)); }
-  catch (error) { console.error('invalid event', error); }
-};
+function connectEvents(runId) {
+  events?.close();
+  const query = runId ? `?runId=${encodeURIComponent(runId)}` : '';
+  events = new EventSource(`/api/events${query}`);
+  events.onopen = () => setConnection(true);
+  events.onerror = () => setConnection(false);
+  events.onmessage = (message) => {
+    try { renderEvent(JSON.parse(message.data)); }
+    catch (error) { console.error('invalid event', error); }
+  };
+}
+
+async function checkHealth() {
+  try {
+    const response = await fetch('/health', { cache: 'no-store' });
+    setConnection(response.ok);
+  } catch {
+    setConnection(false);
+  }
+}
 
 async function submit(text, inputMode = 'text') {
   const clean = text.trim();
@@ -100,8 +140,8 @@ async function submit(text, inputMode = 'text') {
     if (!response.ok) throw new Error(data.error ?? 'No se pudo iniciar');
     currentRunId = data.runId;
     paused = false;
-    pauseButton.textContent = 'Pausar';
-    pauseButton.disabled = false;
+    setRunControls(true);
+    connectEvents(currentRunId);
     command.value = '';
   } catch (error) {
     setPresence('Error', error.message);
@@ -110,24 +150,53 @@ async function submit(text, inputMode = 'text') {
   }
 }
 
+async function controlRun(action) {
+  if (!currentRunId || !currentRunActive) return;
+  const response = await fetch(`/api/runs/${encodeURIComponent(currentRunId)}/${action}`, { method: 'POST' });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    setPresence('Control', data.error ?? 'No se pudo controlar la ejecución.');
+  }
+}
+
 sendButton.addEventListener('click', () => submit(command.value, 'text'));
 command.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') submit(command.value, 'text');
 });
 
-pauseButton.addEventListener('click', async () => {
-  if (!currentRunId) return;
-  const action = paused ? 'resume' : 'pause';
-  const response = await fetch(`/api/runs/${encodeURIComponent(currentRunId)}/${action}`, { method: 'POST' });
-  if (!response.ok) return;
-  paused = !paused;
-  pauseButton.textContent = paused ? 'Continuar' : 'Pausar';
-});
+pauseButton.addEventListener('click', () => controlRun(paused ? 'resume' : 'pause'));
+stopButton.addEventListener('click', () => controlRun('cancel'));
 
 clearButton.addEventListener('click', () => {
   activity.classList.add('empty');
-  activity.innerHTML = '<div class="empty-state">Vista limpia. El historial de ejecución sigue en Janus Core.</div>';
+  activity.innerHTML = '<div class="empty-state">Vista limpia. El historial de ejecución sigue guardado en Janus Core.</div>';
 });
+
+function normalizeVoiceIntent(text) {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[.!?,;:]+$/g, '')
+    .trim();
+}
+
+function handleVoiceText(text) {
+  const intent = normalizeVoiceIntent(text);
+  if (currentRunActive && /^(janus\s+)?(pausa|pausar|espera)$/.test(intent)) {
+    controlRun('pause');
+    return;
+  }
+  if (currentRunActive && /^(janus\s+)?(continua|continuar|sigue|reanuda|reanudar)$/.test(intent)) {
+    controlRun('resume');
+    return;
+  }
+  if (currentRunActive && /^(janus\s+)?(para|detente|detener|cancela|cancelar)$/.test(intent)) {
+    controlRun('cancel');
+    return;
+  }
+  submit(text, 'voice');
+}
 
 function configureSpeechRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -155,7 +224,7 @@ function configureSpeechRecognition() {
       const text = result[0].transcript.trim();
       if (result.isFinal) {
         transcript.textContent = text;
-        submit(text, 'voice');
+        handleVoiceText(text);
       } else {
         interim += `${text} `;
       }
@@ -191,6 +260,7 @@ voiceButton.addEventListener('click', () => {
 });
 
 configureSpeechRecognition();
+checkHealth();
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
