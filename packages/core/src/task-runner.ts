@@ -124,10 +124,11 @@ export class TaskRunner {
       });
       return this.snapshot();
     } catch (error) {
-      if (error instanceof RunCancelledError || this.status === 'cancelled') {
+      const status = this.currentStatus();
+      if (error instanceof RunCancelledError || status === 'cancelled') {
         return this.snapshot();
       }
-      if (this.status === 'blocked' || this.status === 'paused') {
+      if (status === 'blocked' || status === 'paused') {
         return this.snapshot();
       }
       this.status = 'failed';
@@ -139,21 +140,21 @@ export class TaskRunner {
   }
 
   async pause(reason = 'Pausa solicitada por el usuario'): Promise<void> {
-    if (['completed', 'cancelled', 'failed'].includes(this.status)) return;
+    if (this.isTerminal()) return;
     this.paused = true;
     this.status = 'paused';
     await this.emit('run.paused', reason);
   }
 
   async resume(): Promise<void> {
-    if (!this.paused || this.status === 'cancelled') return;
+    if (!this.paused || this.currentStatus() === 'cancelled') return;
     this.paused = false;
     this.status = 'running';
     await this.emit('run.resumed', 'Ejecución reanudada');
   }
 
   async cancel(reason = 'Ejecución detenida por el usuario'): Promise<void> {
-    if (['completed', 'cancelled', 'failed'].includes(this.status)) return;
+    if (this.isTerminal()) return;
     this.paused = false;
     this.status = 'cancelled';
     this.controller.abort(reason);
@@ -190,15 +191,24 @@ export class TaskRunner {
   }
 
   private async checkpoint(): Promise<void> {
-    if (this.controller.signal.aborted || this.status === 'cancelled') {
+    if (this.controller.signal.aborted || this.currentStatus() === 'cancelled') {
       throw new RunCancelledError();
     }
     while (this.paused) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      if (this.controller.signal.aborted || this.status === 'cancelled') {
+      if (this.controller.signal.aborted || this.currentStatus() === 'cancelled') {
         throw new RunCancelledError();
       }
     }
+  }
+
+  private isTerminal(): boolean {
+    const status = this.currentStatus();
+    return status === 'completed' || status === 'cancelled' || status === 'failed';
+  }
+
+  private currentStatus(): RunStatus {
+    return this.status;
   }
 
   private async emit(
