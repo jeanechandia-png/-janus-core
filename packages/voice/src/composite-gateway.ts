@@ -1,5 +1,6 @@
 import type {
   SpeechInputChunk,
+  SpeechOutputChunk,
   SpeechToTextGateway,
   TextToSpeechGateway,
   TranscriptEvent,
@@ -16,7 +17,7 @@ export class CompositeVoiceGateway implements VoiceGateway {
     return this.stt.transcribeStream(chunks);
   }
 
-  synthesize(text: string, voiceId: string): AsyncIterable<Uint8Array> {
+  synthesize(text: string, voiceId: string): AsyncIterable<SpeechOutputChunk> {
     return this.tts.synthesize(text, voiceId);
   }
 }
