@@ -11,6 +11,8 @@ import type {
 import { VoiceSessionRegistry } from '../packages/voice/src/registry.js';
 import { VoiceStreamServer } from '../packages/voice/src/websocket-transport.js';
 
+const TTS_MIME = 'audio/pcm;rate=24000;channels=1;format=s16le';
+
 class SocketTestGateway implements VoiceGateway {
   private ttsRelease?: () => void;
   private readonly ttsGate = new Promise<void>((resolve) => {
@@ -30,15 +32,15 @@ class SocketTestGateway implements VoiceGateway {
     }
   }
 
-  async *synthesize(_text: string, _voiceId: string): AsyncIterable<Uint8Array> {
-    yield new Uint8Array([10, 11]);
+  async *synthesize(_text: string, _voiceId: string) {
+    yield { bytes: new Uint8Array([10, 11]), mimeType: TTS_MIME };
     await this.ttsGate;
-    yield new Uint8Array([12, 13]);
-    yield new Uint8Array([14, 15]);
+    yield { bytes: new Uint8Array([12, 13]), mimeType: TTS_MIME };
+    yield { bytes: new Uint8Array([14, 15]), mimeType: TTS_MIME };
   }
 }
 
-test('WebSocket voice stream carries audio, transcript action, TTS and barge-in', async () => {
+test('WebSocket voice stream carries audio, transcript action, TTS metadata and barge-in', async () => {
   const runs: string[] = [];
   const sessions = new VoiceSessionRegistry(() => ({
     start: async (text) => {
@@ -68,10 +70,12 @@ test('WebSocket voice stream carries audio, transcript action, TTS and barge-in'
   const client = new WebSocket(`ws://127.0.0.1:${address.port}/api/voice/stream`);
   const jsonMessages: Array<Record<string, unknown>> = [];
   const binaryMessages: Uint8Array[] = [];
+  const receivedOrder: string[] = [];
 
   client.on('message', (data, isBinary) => {
     if (isBinary) {
       binaryMessages.push(new Uint8Array(data as Buffer));
+      receivedOrder.push('binary');
       if (binaryMessages.length === 1) {
         client.send(JSON.stringify({ type: 'speech.start' }));
       }
@@ -80,6 +84,7 @@ test('WebSocket voice stream carries audio, transcript action, TTS and barge-in'
     const parsed: unknown = JSON.parse(data.toString());
     if (!isRecord(parsed)) return;
     jsonMessages.push(parsed);
+    if (parsed.type === 'speech.audio') receivedOrder.push('speech.audio');
     if (parsed.type === 'speech.ack' && parsed.state === 'started') {
       gateway.releaseTts();
     }
@@ -111,6 +116,13 @@ test('WebSocket voice stream carries audio, transcript action, TTS and barge-in'
     await startedSpeaking;
 
     assert.equal(binaryMessages.length, 1);
+    const audioMeta = jsonMessages.find((message) => message.type === 'speech.audio');
+    assert.ok(audioMeta);
+    assert.equal(audioMeta.mimeType, TTS_MIME);
+    assert.equal(audioMeta.sequence, 1);
+    assert.equal(audioMeta.byteLength, 2);
+    assert.deepEqual(receivedOrder.slice(0, 2), ['speech.audio', 'binary']);
+
     const interrupted = jsonMessages.find((message) => message.type === 'speech.interrupted');
     assert.ok(interrupted);
     assert.equal(interrupted.reason, 'barge-in');
