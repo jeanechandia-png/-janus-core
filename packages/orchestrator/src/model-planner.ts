@@ -66,6 +66,14 @@ export async function planWithModel(
     };
   }
 
+  if (plan.steps.length === 0) {
+    return {
+      plan: null,
+      provider: response.provider,
+      model: response.model,
+    };
+  }
+
   const validation = validatePlan(plan, {
     maxSteps: options.maxSteps ?? 20,
     allowedTools: options.allowedTools,
@@ -94,7 +102,6 @@ export function parseModelPlan(text: string, fallbackGoal: string, maxSteps = 20
 
   const rawSteps = parsed.steps;
   if (!Array.isArray(rawSteps)) throw new Error('model response must contain a steps array');
-  if (rawSteps.length === 0) throw new Error('model plan has no steps');
   if (rawSteps.length > maxSteps) throw new Error(`model plan exceeds ${maxSteps} steps`);
 
   const steps = rawSteps.map((step, index) => parseToolStep(step, index));
