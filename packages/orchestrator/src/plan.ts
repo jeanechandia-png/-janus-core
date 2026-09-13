@@ -37,6 +37,8 @@ export interface PlanValidationResult {
   errors: string[];
 }
 
+const WRITE_LIKE_ACTION = /(^|\.)(create|update|delete|send|publish|deploy|pay|purchase)(\.|$)/i;
+
 export function validatePlan(
   plan: JanusPlan,
   options: PlanValidationOptions = {},
@@ -63,16 +65,20 @@ export function validatePlan(
       errors.push(`Tool not allowed: ${step.tool}`);
     }
 
-    const actions = options.allowedActions?.get(step.tool);
-    if (actions && !actions.has(step.action)) {
-      errors.push(`Action not allowed: ${step.tool}.${step.action}`);
+    if (options.allowedActions) {
+      const actions = options.allowedActions.get(step.tool);
+      if (!actions) {
+        errors.push(`No actions are allowed for tool: ${step.tool}`);
+      } else if (!actions.has(step.action)) {
+        errors.push(`Action not allowed: ${step.tool}.${step.action}`);
+      }
     }
 
     if ((step.risk === 'high' || !step.reversible) && !step.requiresApproval) {
       errors.push(`Unsafe approval policy for ${step.id}: high-risk/irreversible action must require approval`);
     }
 
-    if (step.action.match(/^(create|update|delete|send|publish|deploy|pay|purchase)/i) && !step.idempotencyKey) {
+    if (WRITE_LIKE_ACTION.test(step.action) && !step.idempotencyKey) {
       errors.push(`Write-like action ${step.id} requires an idempotency key`);
     }
   }
