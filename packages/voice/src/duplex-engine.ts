@@ -1,5 +1,6 @@
 import type {
   SpeechInputChunk,
+  SpeechOutputChunk,
   TranscriptEvent,
   VoiceGateway,
 } from '../../gateways/src/contracts.js';
@@ -20,6 +21,7 @@ export type DuplexVoiceEvent =
       type: 'speech.chunk';
       sequence: number;
       bytes: Uint8Array;
+      mimeType: string;
     }
   | {
       type: 'speech.completed';
@@ -103,7 +105,7 @@ export class DuplexVoiceEngine {
 
     let chunks = 0;
     let interrupted = false;
-    let iterator: AsyncIterator<Uint8Array> | undefined;
+    let iterator: AsyncIterator<SpeechOutputChunk> | undefined;
 
     try {
       iterator = this.gateway.synthesize(clean, voiceId)[Symbol.asyncIterator]();
@@ -125,7 +127,8 @@ export class DuplexVoiceEngine {
         await this.onEvent({
           type: 'speech.chunk',
           sequence: chunks,
-          bytes: next.value,
+          bytes: next.value.bytes,
+          mimeType: next.value.mimeType,
         });
       }
     } catch (error) {
