@@ -41,9 +41,15 @@ test('spoken pause resume and stop control the active run instead of creating ne
         calls.push(`start:${text}`);
         return `run_${runCounter}`;
       },
-      pause: async (runId) => calls.push(`pause:${runId}`),
-      resume: async (runId) => calls.push(`resume:${runId}`),
-      cancel: async (runId) => calls.push(`cancel:${runId}`),
+      pause: async (runId) => {
+        calls.push(`pause:${runId}`);
+      },
+      resume: async (runId) => {
+        calls.push(`resume:${runId}`);
+      },
+      cancel: async (runId) => {
+        calls.push(`cancel:${runId}`);
+      },
     },
   });
 
