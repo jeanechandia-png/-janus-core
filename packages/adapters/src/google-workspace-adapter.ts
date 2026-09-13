@@ -98,7 +98,7 @@ export class GoogleWorkspaceAdapter implements ToolAdapter {
     url.searchParams.set('orderBy', 'modifiedTime desc');
     url.searchParams.set(
       'fields',
-      'nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,parents)',
+      'nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink)',
     );
 
     if (rawQuery) {
@@ -146,11 +146,10 @@ export class GoogleWorkspaceAdapter implements ToolAdapter {
       detailUrl.searchParams.set('format', 'metadata');
       detailUrl.searchParams.append('metadataHeaders', 'Subject');
       detailUrl.searchParams.append('metadataHeaders', 'From');
-      detailUrl.searchParams.append('metadataHeaders', 'To');
       detailUrl.searchParams.append('metadataHeaders', 'Date');
       detailUrl.searchParams.set(
         'fields',
-        'id,threadId,labelIds,snippet,internalDate,payload(headers)',
+        'id,threadId,labelIds,internalDate,payload(headers)',
       );
       const detail = await this.requestJson(detailUrl, token);
       if (!detail.ok) return detail;
@@ -186,7 +185,7 @@ export class GoogleWorkspaceAdapter implements ToolAdapter {
     url.searchParams.set('timeMax', timeMax);
     url.searchParams.set(
       'fields',
-      'nextPageToken,timeZone,items(id,status,summary,description,location,htmlLink,start,end,attendees(email,responseStatus,self),organizer(email,displayName,self))',
+      'nextPageToken,timeZone,items(id,status,summary,location,htmlLink,start,end)',
     );
     const timeZone = stringValue(input.timeZone);
     if (timeZone) url.searchParams.set('timeZone', timeZone);
@@ -243,11 +242,9 @@ function normalizeGmailMessage(message: JsonRecord): JsonRecord {
     id: message.id,
     threadId: message.threadId,
     labelIds: message.labelIds,
-    snippet: message.snippet,
     internalDate: message.internalDate,
     subject: headerMap.subject,
     from: headerMap.from,
-    to: headerMap.to,
     date: headerMap.date,
   };
 }
