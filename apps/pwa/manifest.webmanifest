@@ -1,0 +1,9 @@
+{
+  "name": "JANUS",
+  "short_name": "JANUS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070a10",
+  "theme_color": "#070a10",
+  "description": "JANUS local-first personal AI operating system"
+}
