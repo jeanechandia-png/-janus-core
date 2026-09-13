@@ -8,6 +8,8 @@ import type {
 import { DuplexVoiceEngine, type DuplexVoiceEvent } from '../packages/voice/src/duplex-engine.js';
 import { VoiceSessionController } from '../packages/voice/src/session.js';
 
+const TTS_MIME = 'audio/pcm;rate=24000;channels=1;format=s16le';
+
 class TranscriptGateway implements VoiceGateway {
   async *transcribeStream(chunks: AsyncIterable<SpeechInputChunk>): AsyncIterable<TranscriptEvent> {
     let count = 0;
@@ -22,8 +24,8 @@ class TranscriptGateway implements VoiceGateway {
     }
   }
 
-  async *synthesize(_text: string, _voiceId: string): AsyncIterable<Uint8Array> {
-    yield new Uint8Array([1]);
+  async *synthesize(_text: string, _voiceId: string) {
+    yield { bytes: new Uint8Array([1]), mimeType: TTS_MIME };
   }
 }
 
@@ -79,9 +81,9 @@ test('barge-in interrupts TTS after the current emitted chunk without killing se
   const gateway: VoiceGateway = {
     transcribeStream: async function* () {},
     synthesize: async function* () {
-      yield new Uint8Array([1, 2]);
-      yield new Uint8Array([3, 4]);
-      yield new Uint8Array([5, 6]);
+      yield { bytes: new Uint8Array([1, 2]), mimeType: TTS_MIME };
+      yield { bytes: new Uint8Array([3, 4]), mimeType: TTS_MIME };
+      yield { bytes: new Uint8Array([5, 6]), mimeType: TTS_MIME };
     },
   };
 
@@ -101,7 +103,11 @@ test('barge-in interrupts TTS after the current emitted chunk without killing se
 
   await engine.speak('Respuesta que debe poder interrumpirse.');
 
-  assert.equal(events.filter((event) => event.type === 'speech.chunk').length, 1);
+  const chunks = events.filter((event) => event.type === 'speech.chunk');
+  assert.equal(chunks.length, 1);
+  const firstChunk = chunks[0];
+  assert.ok(firstChunk && firstChunk.type === 'speech.chunk');
+  assert.equal(firstChunk.mimeType, TTS_MIME);
   const interrupted = events.find((event) => event.type === 'speech.interrupted');
   assert.ok(interrupted && interrupted.type === 'speech.interrupted');
   assert.equal(interrupted.reason, 'barge-in');
@@ -123,8 +129,8 @@ test('completed synthesis reports chunk count and returns speaking state to fals
   const gateway: VoiceGateway = {
     transcribeStream: async function* () {},
     synthesize: async function* () {
-      yield new Uint8Array([1]);
-      yield new Uint8Array([2]);
+      yield { bytes: new Uint8Array([1]), mimeType: TTS_MIME };
+      yield { bytes: new Uint8Array([2]), mimeType: TTS_MIME };
     },
   };
   const events: DuplexVoiceEvent[] = [];
