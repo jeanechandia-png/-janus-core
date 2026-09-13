@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "start": "node --import tsx apps/runtime/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx tests/task-runner.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
     "demo": "node --import tsx examples/observable-run.ts"
   },
   "devDependencies": {
