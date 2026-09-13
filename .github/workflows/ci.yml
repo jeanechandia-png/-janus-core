@@ -27,6 +27,7 @@ jobs:
         run: |
           node --check apps/pwa/app.js
           node --check apps/pwa/pcm-capture-worklet.js
+          node --check apps/pwa/pcm-tts-player.js
           node --check apps/pwa/sw.js
       - name: Tests
         run: npm test
