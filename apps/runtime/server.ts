@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GitHubAdapter } from '../../packages/adapters/src/github-adapter.js';
+import { GoogleWorkspaceAdapter } from '../../packages/adapters/src/google-workspace-adapter.js';
 import { EventHub } from '../../packages/core/src/event-hub.js';
 import type { EventSink, RunSnapshot } from '../../packages/core/src/events.js';
 import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
@@ -16,6 +17,7 @@ import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
 const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
 const dbPath = process.env.JANUS_DB ?? join(process.cwd(), 'data', 'janus.db');
+const timeZone = process.env.JANUS_TIME_ZONE?.trim() || undefined;
 
 const hub = new EventHub();
 const store = new SqliteStore(dbPath);
@@ -23,10 +25,16 @@ const runners = new Map<string, TaskRunner>();
 const toolGateway = new DefaultToolGateway();
 
 toolGateway.register(new GitHubAdapter({ token: process.env.GITHUB_TOKEN }));
+toolGateway.register(new GoogleWorkspaceAdapter({ accessToken: process.env.GOOGLE_ACCESS_TOKEN }));
 
-const allowedTools = new Set(['github']);
+const allowedTools = new Set(['github', 'google-workspace']);
 const allowedActions = new Map([
   ['github', new Set(['repo.get', 'contents.list', 'file.read'])],
+  ['google-workspace', new Set([
+    'drive.files.search',
+    'gmail.messages.search',
+    'calendar.events.list',
+  ])],
 ]);
 
 const voiceSessions = new VoiceSessionRegistry(() => ({
@@ -91,7 +99,7 @@ function demoSteps(command: string): JanusStep[] {
 }
 
 function prepareSteps(command: string): JanusStep[] | null {
-  const plan = deterministicPlan(command);
+  const plan = deterministicPlan(command, { timeZone });
   if (!plan) return null;
 
   const validation = validatePlan(plan, {
@@ -240,10 +248,20 @@ const server = createServer(async (request, response) => {
       service: 'janus-runtime',
       durable: true,
       db: dbPath === ':memory:' ? 'memory' : 'sqlite',
+      timeZone: timeZone ?? 'runtime-default',
       voiceSessionAuthority: 'core',
       planner: 'core-validated',
       tools: {
         github: ['repo.get', 'contents.list', 'file.read'],
+        googleWorkspace: [
+          'drive.files.search',
+          'gmail.messages.search',
+          'calendar.events.list',
+        ],
+      },
+      credentials: {
+        githubConfigured: Boolean(process.env.GITHUB_TOKEN?.trim()),
+        googleConfigured: Boolean(process.env.GOOGLE_ACCESS_TOKEN?.trim()),
       },
     });
     return;
