@@ -1,10 +1,11 @@
-const CACHE = 'janus-shell-v3';
+const CACHE = 'janus-shell-v4';
 const SHELL = [
   '/',
   '/index.html',
   '/styles.css',
   '/app.js',
   '/pcm-capture-worklet.js',
+  '/pcm-tts-player.js',
   '/manifest.webmanifest',
 ];
 
