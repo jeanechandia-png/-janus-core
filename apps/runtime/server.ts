@@ -2,16 +2,19 @@ import { createReadStream, existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ChatCompletionsModelAdapter } from '../../packages/adapters/src/chat-completions-model-adapter.js';
 import { GitHubAdapter } from '../../packages/adapters/src/github-adapter.js';
 import { GoogleWorkspaceAdapter } from '../../packages/adapters/src/google-workspace-adapter.js';
 import { EventHub } from '../../packages/core/src/event-hub.js';
 import type { EventSink, RunSnapshot } from '../../packages/core/src/events.js';
 import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
 import { TaskRunner, type JanusStep } from '../../packages/core/src/task-runner.js';
+import type { ModelGateway } from '../../packages/gateways/src/contracts.js';
 import { DefaultToolGateway } from '../../packages/gateways/src/tool-gateway.js';
 import { compilePlan } from '../../packages/orchestrator/src/compile-plan.js';
 import { deterministicPlan } from '../../packages/orchestrator/src/deterministic-planner.js';
-import { validatePlan } from '../../packages/orchestrator/src/plan.js';
+import { planWithModel } from '../../packages/orchestrator/src/model-planner.js';
+import { validatePlan, type JanusPlan } from '../../packages/orchestrator/src/plan.js';
 import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
 
 const port = Number(process.env.PORT ?? 8787);
@@ -36,6 +39,11 @@ const allowedActions = new Map([
     'calendar.events.list',
   ])],
 ]);
+const toolCatalog = Object.fromEntries(
+  Array.from(allowedActions.entries(), ([tool, actions]) => [tool, Array.from(actions)]),
+) as Record<string, string[]>;
+
+const modelGateway = createConfiguredModelGateway();
 
 const voiceSessions = new VoiceSessionRegistry(() => ({
   start: async (text) => startRun(text, 'voice'),
@@ -51,6 +59,20 @@ if (interruptedRuns > 0) {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function createConfiguredModelGateway(): ModelGateway | undefined {
+  const baseUrl = process.env.JANUS_MODEL_BASE_URL?.trim();
+  const model = process.env.JANUS_MODEL_NAME?.trim();
+  if (!baseUrl || !model) return undefined;
+
+  return new ChatCompletionsModelAdapter({
+    baseUrl,
+    model,
+    providerName: process.env.JANUS_MODEL_PROVIDER?.trim() || undefined,
+    apiKey: process.env.JANUS_MODEL_API_KEY,
+    supportsJsonMode: process.env.JANUS_MODEL_JSON_MODE === 'true',
+  });
+}
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -98,11 +120,30 @@ function demoSteps(command: string): JanusStep[] {
   ];
 }
 
-function prepareSteps(command: string): JanusStep[] | null {
-  const plan = deterministicPlan(command, { timeZone });
+async function prepareSteps(command: string): Promise<JanusStep[] | null> {
+  let plan: JanusPlan | null = deterministicPlan(command, { timeZone });
+
+  if (!plan && modelGateway) {
+    const modelResult = await planWithModel(command, {
+      modelGateway,
+      toolCatalog,
+      context: {
+        ...(timeZone ? { timeZone } : {}),
+        executionPolicy: 'Janus Core validates every proposed step before execution',
+      },
+      maxSteps: 20,
+      allowedTools,
+      allowedActions,
+    });
+
+    if (modelResult.error) throw new Error(modelResult.error);
+    plan = modelResult.plan;
+  }
+
   if (!plan) return null;
 
   const validation = validatePlan(plan, {
+    maxSteps: 20,
     allowedTools,
     allowedActions,
   });
@@ -143,7 +184,7 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
 
       let steps: JanusStep[];
       try {
-        steps = prepareSteps(command) ?? demoSteps(command);
+        steps = (await prepareSteps(command)) ?? demoSteps(command);
       } catch (error) {
         await activeRunner.block('Janus Core rechazó el plan antes de ejecutar herramientas', {
           error: error instanceof Error ? error.message : String(error),
@@ -250,7 +291,7 @@ const server = createServer(async (request, response) => {
       db: dbPath === ':memory:' ? 'memory' : 'sqlite',
       timeZone: timeZone ?? 'runtime-default',
       voiceSessionAuthority: 'core',
-      planner: 'core-validated',
+      planner: modelGateway ? 'deterministic+model-core-validated' : 'deterministic-core-validated',
       tools: {
         github: ['repo.get', 'contents.list', 'file.read'],
         googleWorkspace: [
@@ -262,6 +303,7 @@ const server = createServer(async (request, response) => {
       credentials: {
         githubConfigured: Boolean(process.env.GITHUB_TOKEN?.trim()),
         googleConfigured: Boolean(process.env.GOOGLE_ACCESS_TOKEN?.trim()),
+        modelConfigured: Boolean(modelGateway),
       },
     });
     return;
