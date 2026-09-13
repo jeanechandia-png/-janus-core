@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { ChatCompletionsModelAdapter } from '../../packages/adapters/src/chat-completions-model-adapter.js';
 import { GitHubAdapter } from '../../packages/adapters/src/github-adapter.js';
 import { GoogleWorkspaceAdapter } from '../../packages/adapters/src/google-workspace-adapter.js';
+import { CapabilityRegistry } from '../../packages/core/src/capability-registry.js';
 import { EventHub } from '../../packages/core/src/event-hub.js';
 import type { EventSink, RunSnapshot } from '../../packages/core/src/events.js';
 import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
@@ -21,28 +22,31 @@ const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
 const dbPath = process.env.JANUS_DB ?? join(process.cwd(), 'data', 'janus.db');
 const timeZone = process.env.JANUS_TIME_ZONE?.trim() || undefined;
+const googleAccessToken = process.env.GOOGLE_ACCESS_TOKEN?.trim() || undefined;
 
 const hub = new EventHub();
 const store = new SqliteStore(dbPath);
 const runners = new Map<string, TaskRunner>();
 const toolGateway = new DefaultToolGateway();
+const capabilities = new CapabilityRegistry();
 
 toolGateway.register(new GitHubAdapter({ token: process.env.GITHUB_TOKEN }));
-toolGateway.register(new GoogleWorkspaceAdapter({ accessToken: process.env.GOOGLE_ACCESS_TOKEN }));
+toolGateway.register(new GoogleWorkspaceAdapter({ accessToken: googleAccessToken }));
 
-const allowedTools = new Set(['github', 'google-workspace']);
-const allowedActions = new Map([
-  ['github', new Set(['repo.get', 'contents.list', 'file.read'])],
-  ['google-workspace', new Set([
-    'drive.files.search',
-    'gmail.messages.search',
-    'calendar.events.list',
-  ])],
-]);
-const toolCatalog = Object.fromEntries(
-  Array.from(allowedActions.entries(), ([tool, actions]) => [tool, Array.from(actions)]),
-) as Record<string, string[]>;
+capabilities.register({
+  tool: 'github',
+  actions: ['repo.get', 'contents.list', 'file.read'],
+  state: 'available',
+});
+capabilities.register({
+  tool: 'google-workspace',
+  actions: ['drive.files.search', 'gmail.messages.search', 'calendar.events.list'],
+  state: googleAccessToken ? 'available' : 'needs_auth',
+  ...(!googleAccessToken ? { reason: 'Google Workspace necesita autorización antes de ejecutar.' } : {}),
+});
 
+const allowedTools = capabilities.allAllowedTools();
+const allowedActions = capabilities.allAllowedActions();
 const modelGateway = createConfiguredModelGateway();
 
 const voiceSessions = new VoiceSessionRegistry(() => ({
@@ -126,7 +130,7 @@ async function prepareSteps(command: string): Promise<JanusStep[] | null> {
   if (!plan && modelGateway) {
     const modelResult = await planWithModel(command, {
       modelGateway,
-      toolCatalog,
+      toolCatalog: capabilities.availableCatalog(),
       context: {
         ...(timeZone ? { timeZone } : {}),
         executionPolicy: 'Janus Core validates every proposed step before execution',
@@ -152,7 +156,19 @@ async function prepareSteps(command: string): Promise<JanusStep[] | null> {
     throw new Error(`Plan rejected by Janus Core: ${validation.errors.join('; ')}`);
   }
 
+  assertCapabilitiesReady(plan);
   return compilePlan(plan, { toolGateway });
+}
+
+function assertCapabilitiesReady(plan: JanusPlan): void {
+  for (const step of plan.steps) {
+    const check = capabilities.check(step.tool, step.action);
+    if (!check.ok) {
+      throw new Error(
+        `Capability ${step.tool}.${step.action} is not ready (${check.state ?? 'unavailable'}): ${check.reason ?? 'sin detalle'}`,
+      );
+    }
+  }
 }
 
 function startRun(command: string, inputMode: 'voice' | 'text'): string {
@@ -292,17 +308,11 @@ const server = createServer(async (request, response) => {
       timeZone: timeZone ?? 'runtime-default',
       voiceSessionAuthority: 'core',
       planner: modelGateway ? 'deterministic+model-core-validated' : 'deterministic-core-validated',
-      tools: {
-        github: ['repo.get', 'contents.list', 'file.read'],
-        googleWorkspace: [
-          'drive.files.search',
-          'gmail.messages.search',
-          'calendar.events.list',
-        ],
-      },
+      tools: capabilities.availableCatalog(),
+      capabilities: capabilities.snapshot(),
       credentials: {
         githubConfigured: Boolean(process.env.GITHUB_TOKEN?.trim()),
-        googleConfigured: Boolean(process.env.GOOGLE_ACCESS_TOKEN?.trim()),
+        googleConfigured: Boolean(googleAccessToken),
         modelConfigured: Boolean(modelGateway),
       },
     });
