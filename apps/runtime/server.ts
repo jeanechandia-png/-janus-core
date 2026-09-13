@@ -3,12 +3,22 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventHub } from '../../packages/core/src/event-hub.js';
+import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
 import { TaskRunner, type JanusStep } from '../../packages/core/src/task-runner.js';
+import type { EventSink } from '../../packages/core/src/events.js';
 
 const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
+const dbPath = process.env.JANUS_DB ?? join(process.cwd(), 'data', 'janus.db');
 const hub = new EventHub();
+const store = new SqliteStore(dbPath);
 const runners = new Map<string, TaskRunner>();
+
+const interruptedRuns = store.markInterruptedRuns();
+hub.hydrate(store.listEvents(undefined, 500));
+if (interruptedRuns > 0) {
+  console.warn(`Recovered ${interruptedRuns} interrupted Janus run(s) as blocked.`);
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -67,22 +77,33 @@ function demoSteps(command: string): JanusStep[] {
 }
 
 function startRun(command: string, inputMode: 'voice' | 'text'): string {
-  const runner = new TaskRunner(command, {
-    sink: hub.sink,
+  let runner: TaskRunner;
+  const durableSink: EventSink = async (event) => {
+    store.appendEvent(event);
+    await hub.sink(event);
+    if (runner) store.upsertRun(runner.snapshot());
+  };
+
+  runner = new TaskRunner(command, {
+    sink: durableSink,
     approvalHandler: async (action) => ({
       approved: action.risk === 'none' || action.risk === 'low',
       reason: action.risk === 'high' ? 'La acción de alto riesgo requiere aprobación explícita.' : undefined,
     }),
   });
+
   const runId = runner.snapshot().runId;
   runners.set(runId, runner);
+  store.upsertRun(runner.snapshot());
 
-  void (async () => {
-    await runner.heard(inputMode);
-    await runner.execute(demoSteps(command));
-  })().catch((error) => {
-    console.error('run failed', error);
-  });
+  setTimeout(() => {
+    void (async () => {
+      await runner.heard(inputMode);
+      await runner.execute(demoSteps(command));
+    })().catch((error) => {
+      console.error('run failed', error);
+    });
+  }, 25);
 
   return runId;
 }
@@ -99,7 +120,8 @@ function handleEvents(request: IncomingMessage, response: ServerResponse): void 
   });
 
   const send = (event: unknown) => response.write(`data: ${JSON.stringify(event)}\n\n`);
-  for (const event of hub.replay(runId)) send(event);
+  const replay = runId ? store.listEvents(runId) : hub.replay();
+  for (const event of replay) send(event);
 
   const unsubscribe = hub.subscribe((event) => {
     if (!runId || event.runId === runId) send(event);
@@ -140,7 +162,12 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
   if (request.method === 'GET' && url.pathname === '/health') {
-    json(response, 200, { ok: true, service: 'janus-runtime' });
+    json(response, 200, {
+      ok: true,
+      service: 'janus-runtime',
+      durable: true,
+      db: dbPath === ':memory:' ? 'memory' : 'sqlite',
+    });
     return;
   }
 
@@ -162,21 +189,44 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  const getRun = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+  if (request.method === 'GET' && getRun) {
+    const live = runners.get(getRun[1])?.snapshot();
+    const persisted = store.getRun(getRun[1]);
+    if (!live && !persisted) {
+      json(response, 404, { ok: false, error: 'run not found' });
+      return;
+    }
+    json(response, 200, { ok: true, snapshot: live ?? persisted });
+    return;
+  }
+
   const control = url.pathname.match(/^\/api\/runs\/([^/]+)\/(pause|resume)$/);
   if (request.method === 'POST' && control) {
     const runner = runners.get(control[1]);
     if (!runner) {
-      json(response, 404, { ok: false, error: 'run not found' });
+      json(response, 409, { ok: false, error: 'run is not active in this runtime' });
       return;
     }
     if (control[2] === 'pause') await runner.pause();
     else await runner.resume();
+    store.upsertRun(runner.snapshot());
     json(response, 200, { ok: true, snapshot: runner.snapshot() });
     return;
   }
 
   serveStatic(url.pathname, response);
 });
+
+function shutdown(): void {
+  server.close(() => {
+    store.close();
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`JANUS runtime listening on http://0.0.0.0:${port}`);
