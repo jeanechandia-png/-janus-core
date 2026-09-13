@@ -34,7 +34,8 @@ test('Drive search uses bearer auth without exposing the token in the result', a
   assert.equal(result.ok, true);
   assert.equal(seen.authorization, 'Bearer secret-google-token');
   assert.match(seen.url ?? '', /drive\/v3\/files/);
-  assert.match(decodeURIComponent(seen.url ?? ''), /name contains 'Janus'/);
+  const driveUrl = new URL(seen.url ?? 'https://invalid.local');
+  assert.equal(driveUrl.searchParams.get('q'), "name contains 'Janus' and trashed = false");
   assert.equal(JSON.stringify(result).includes('secret-google-token'), false);
 });
 
@@ -80,7 +81,7 @@ test('Gmail search resolves list IDs into safe message metadata', async () => {
   assert.equal(urls.length, 2);
   const [listUrl] = urls;
   assert.ok(listUrl);
-  assert.match(decodeURIComponent(listUrl), /q=is:unread factura/);
+  assert.equal(new URL(listUrl).searchParams.get('q'), 'is:unread factura');
   const output = result.output as { messages?: Array<Record<string, unknown>> } | undefined;
   assert.equal(output?.messages?.[0]?.subject, 'Factura');
   assert.equal(output?.messages?.[0]?.from, 'billing@example.com');
