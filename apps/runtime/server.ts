@@ -5,12 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { ChatCompletionsModelAdapter } from '../../packages/adapters/src/chat-completions-model-adapter.js';
 import { GitHubAdapter } from '../../packages/adapters/src/github-adapter.js';
 import { GoogleWorkspaceAdapter } from '../../packages/adapters/src/google-workspace-adapter.js';
+import { Qwen3TtsHttpAdapter } from '../../packages/adapters/src/qwen3-tts-http-adapter.js';
+import { WhisperCppSttAdapter } from '../../packages/adapters/src/whisper-cpp-stt-adapter.js';
 import { CapabilityRegistry } from '../../packages/core/src/capability-registry.js';
 import { EventHub } from '../../packages/core/src/event-hub.js';
 import type { EventSink, RunSnapshot } from '../../packages/core/src/events.js';
 import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
 import { TaskRunner, type JanusStep } from '../../packages/core/src/task-runner.js';
-import type { ModelGateway } from '../../packages/gateways/src/contracts.js';
+import type { ModelGateway, VoiceGateway } from '../../packages/gateways/src/contracts.js';
 import { DefaultToolGateway } from '../../packages/gateways/src/tool-gateway.js';
 import { compilePlan } from '../../packages/orchestrator/src/compile-plan.js';
 import { deterministicPlan } from '../../packages/orchestrator/src/deterministic-planner.js';
@@ -20,12 +22,17 @@ import {
   CredentialBroker,
   EnvironmentCredentialProvider,
 } from '../../packages/security/src/credential-provider.js';
+import { CompositeVoiceGateway } from '../../packages/voice/src/composite-gateway.js';
 import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
+import { VoiceStreamServer } from '../../packages/voice/src/websocket-transport.js';
 
 const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
 const dbPath = process.env.JANUS_DB ?? join(process.cwd(), 'data', 'janus.db');
 const timeZone = process.env.JANUS_TIME_ZONE?.trim() || undefined;
+const sttBaseUrl = process.env.JANUS_STT_BASE_URL?.trim() || undefined;
+const ttsBaseUrl = process.env.JANUS_TTS_BASE_URL?.trim() || undefined;
+const defaultVoiceId = process.env.JANUS_VOICE_ID?.trim() || 'janus-default';
 
 const environmentCredentials = new EnvironmentCredentialProvider({
   serviceVariables: {
@@ -71,6 +78,7 @@ capabilities.register({
 const allowedTools = capabilities.allAllowedTools();
 const allowedActions = capabilities.allAllowedActions();
 const modelGateway = createConfiguredModelGateway();
+const voiceGateway = createConfiguredVoiceGateway();
 
 const voiceSessions = new VoiceSessionRegistry(() => ({
   start: async (text) => startRun(text, 'voice'),
@@ -99,6 +107,31 @@ function createConfiguredModelGateway(): ModelGateway | undefined {
     tokenProvider: () => credentialBroker.accessToken('model'),
     supportsJsonMode: process.env.JANUS_MODEL_JSON_MODE === 'true',
   });
+}
+
+function createConfiguredVoiceGateway(): VoiceGateway | undefined {
+  if (!sttBaseUrl || !ttsBaseUrl) return undefined;
+
+  const stt = new WhisperCppSttAdapter({
+    baseUrl: sttBaseUrl,
+    language: process.env.JANUS_STT_LANGUAGE?.trim() || 'auto',
+    allowRemote: process.env.JANUS_STT_ALLOW_REMOTE === 'true',
+  });
+  const tts = new Qwen3TtsHttpAdapter({
+    baseUrl: ttsBaseUrl,
+    language: process.env.JANUS_TTS_LANGUAGE?.trim() || 'Auto',
+    instruct: process.env.JANUS_TTS_INSTRUCT?.trim() || undefined,
+    chunkMs: numericEnv('JANUS_TTS_CHUNK_MS'),
+    allowRemote: process.env.JANUS_TTS_ALLOW_REMOTE === 'true',
+  });
+  return new CompositeVoiceGateway(stt, tts);
+}
+
+function numericEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -330,6 +363,24 @@ const server = createServer(async (request, response) => {
       db: dbPath === ':memory:' ? 'memory' : 'sqlite',
       timeZone: timeZone ?? 'runtime-default',
       voiceSessionAuthority: 'core',
+      voice: {
+        streaming: voiceGateway
+          ? {
+              state: 'available',
+              transport: 'websocket',
+              input: 'audio/pcm;rate=16000;channels=1;format=s16le',
+              stt: 'whisper.cpp-adapter',
+              tts: 'qwen3-tts-adapter',
+            }
+          : {
+              state: 'unavailable',
+              reason: !sttBaseUrl && !ttsBaseUrl
+                ? 'STT y TTS locales no están configurados.'
+                : !sttBaseUrl
+                  ? 'STT local no está configurado.'
+                  : 'TTS local no está configurado.',
+            },
+      },
       planner: modelGateway ? 'deterministic+model-core-validated' : 'deterministic-core-validated',
       tools: capabilities.availableCatalog(),
       capabilities: capabilities.snapshot(),
@@ -455,11 +506,26 @@ const server = createServer(async (request, response) => {
   serveStatic(url.pathname, response);
 });
 
+const voiceStream = voiceGateway
+  ? new VoiceStreamServer({
+      server,
+      sessions: voiceSessions,
+      gatewayFactory: async () => voiceGateway,
+      defaultVoiceId,
+    })
+  : undefined;
+
+let shuttingDown = false;
 function shutdown(): void {
-  server.close(() => {
-    store.close();
-    process.exit(0);
-  });
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void (async () => {
+    await voiceStream?.close().catch((error) => console.error('voice shutdown failed', error));
+    server.close(() => {
+      store.close();
+      process.exit(0);
+    });
+  })();
 }
 
 process.on('SIGINT', shutdown);
