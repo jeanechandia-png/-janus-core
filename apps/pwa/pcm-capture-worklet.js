@@ -43,11 +43,12 @@ class JanusPcmCaptureProcessor extends AudioWorkletProcessor {
       this.readPosition += this.ratio;
     }
 
-    const consumed = Math.floor(this.readPosition);
+    const maxConsumable = Math.max(0, this.sourceLength - 1);
+    const consumed = Math.min(Math.floor(this.readPosition), maxConsumable);
     if (consumed <= 0) return;
 
     const remaining = this.sourceLength - consumed;
-    if (remaining > 0) this.source.copyWithin(0, consumed, this.sourceLength);
+    this.source.copyWithin(0, consumed, this.sourceLength);
     this.sourceLength = remaining;
     this.readPosition -= consumed;
   }
