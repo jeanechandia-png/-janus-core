@@ -29,6 +29,8 @@ jobs:
           node --check apps/pwa/pcm-capture-worklet.js
           node --check apps/pwa/pcm-tts-player.js
           node --check apps/pwa/sw.js
+      - name: Sidecar syntax
+        run: python3 -m py_compile sidecars/qwen3_tts_server.py
       - name: Tests
         run: npm test
       - name: Runtime smoke
