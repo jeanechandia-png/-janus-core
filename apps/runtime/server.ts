@@ -16,13 +16,25 @@ import { compilePlan } from '../../packages/orchestrator/src/compile-plan.js';
 import { deterministicPlan } from '../../packages/orchestrator/src/deterministic-planner.js';
 import { planWithModel } from '../../packages/orchestrator/src/model-planner.js';
 import { validatePlan, type JanusPlan } from '../../packages/orchestrator/src/plan.js';
+import {
+  CredentialBroker,
+  EnvironmentCredentialProvider,
+} from '../../packages/security/src/credential-provider.js';
 import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
 
 const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
 const dbPath = process.env.JANUS_DB ?? join(process.cwd(), 'data', 'janus.db');
 const timeZone = process.env.JANUS_TIME_ZONE?.trim() || undefined;
-const googleAccessToken = process.env.GOOGLE_ACCESS_TOKEN?.trim() || undefined;
+
+const environmentCredentials = new EnvironmentCredentialProvider({
+  serviceVariables: {
+    github: 'GITHUB_TOKEN',
+    'google-workspace': 'GOOGLE_ACCESS_TOKEN',
+    model: 'JANUS_MODEL_API_KEY',
+  },
+});
+const credentialBroker = new CredentialBroker([environmentCredentials]);
 
 const hub = new EventHub();
 const store = new SqliteStore(dbPath);
@@ -30,9 +42,20 @@ const runners = new Map<string, TaskRunner>();
 const toolGateway = new DefaultToolGateway();
 const capabilities = new CapabilityRegistry();
 
-toolGateway.register(new GitHubAdapter({ token: process.env.GITHUB_TOKEN }));
-toolGateway.register(new GoogleWorkspaceAdapter({ accessToken: googleAccessToken }));
+toolGateway.register(new GitHubAdapter({
+  tokenProvider: () => credentialBroker.accessToken('github'),
+}));
+toolGateway.register(new GoogleWorkspaceAdapter({
+  tokenProvider: async () => (
+    await credentialBroker.accessToken('google-workspace', [
+      'drive.metadata.readonly',
+      'gmail.readonly',
+      'calendar.events.readonly',
+    ])
+  ) ?? '',
+}));
 
+const googleConfigured = environmentCredentials.configured('google-workspace');
 capabilities.register({
   tool: 'github',
   actions: ['repo.get', 'contents.list', 'file.read'],
@@ -41,8 +64,8 @@ capabilities.register({
 capabilities.register({
   tool: 'google-workspace',
   actions: ['drive.files.search', 'gmail.messages.search', 'calendar.events.list'],
-  state: googleAccessToken ? 'available' : 'needs_auth',
-  ...(!googleAccessToken ? { reason: 'Google Workspace necesita autorización antes de ejecutar.' } : {}),
+  state: googleConfigured ? 'available' : 'needs_auth',
+  ...(!googleConfigured ? { reason: 'Google Workspace necesita autorización antes de ejecutar.' } : {}),
 });
 
 const allowedTools = capabilities.allAllowedTools();
@@ -73,7 +96,7 @@ function createConfiguredModelGateway(): ModelGateway | undefined {
     baseUrl,
     model,
     providerName: process.env.JANUS_MODEL_PROVIDER?.trim() || undefined,
-    apiKey: process.env.JANUS_MODEL_API_KEY,
+    tokenProvider: () => credentialBroker.accessToken('model'),
     supportsJsonMode: process.env.JANUS_MODEL_JSON_MODE === 'true',
   });
 }
@@ -311,9 +334,10 @@ const server = createServer(async (request, response) => {
       tools: capabilities.availableCatalog(),
       capabilities: capabilities.snapshot(),
       credentials: {
-        githubConfigured: Boolean(process.env.GITHUB_TOKEN?.trim()),
-        googleConfigured: Boolean(googleAccessToken),
+        githubConfigured: environmentCredentials.configured('github'),
+        googleConfigured,
         modelConfigured: Boolean(modelGateway),
+        provider: 'replaceable-broker',
       },
     });
     return;
