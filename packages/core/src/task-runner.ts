@@ -8,8 +8,17 @@ import type {
   RunStatus,
 } from './events.js';
 
+class RunCancelledError extends Error {
+  constructor() {
+    super('Run cancelled');
+    this.name = 'RunCancelledError';
+  }
+}
+
 export interface StepContext {
   runId: string;
+  signal: AbortSignal;
+  checkpoint: () => Promise<void>;
   emit: (
     type: JanusEventType,
     summary: string,
@@ -51,6 +60,7 @@ export class TaskRunner {
   private updatedAt: string;
   private readonly goal: string;
   private readonly options: TaskRunnerOptions;
+  private readonly controller = new AbortController();
 
   constructor(goal: string, options: TaskRunnerOptions) {
     this.goal = goal;
@@ -86,7 +96,7 @@ export class TaskRunner {
 
     try {
       for (const step of steps) {
-        await this.waitWhilePaused();
+        await this.checkpoint();
         this.currentStep = step.id;
         await this.emit('run.step.started', step.label, {
           stepId: step.id,
@@ -94,11 +104,14 @@ export class TaskRunner {
 
         await step.run({
           runId: this.runId,
+          signal: this.controller.signal,
+          checkpoint: () => this.checkpoint(),
           emit: (type, summary, payload = {}, source = 'core') =>
             this.emit(type, summary, payload, source),
           assertCanExecute: (action) => this.assertCanExecute(action),
         });
 
+        await this.checkpoint();
         await this.emit('run.step.completed', `${step.label} — terminado`, {
           stepId: step.id,
         });
@@ -111,6 +124,9 @@ export class TaskRunner {
       });
       return this.snapshot();
     } catch (error) {
+      if (error instanceof RunCancelledError || this.status === 'cancelled') {
+        return this.snapshot();
+      }
       if (this.status === 'blocked' || this.status === 'paused') {
         return this.snapshot();
       }
@@ -123,15 +139,25 @@ export class TaskRunner {
   }
 
   async pause(reason = 'Pausa solicitada por el usuario'): Promise<void> {
+    if (['completed', 'cancelled', 'failed'].includes(this.status)) return;
     this.paused = true;
     this.status = 'paused';
     await this.emit('run.paused', reason);
   }
 
   async resume(): Promise<void> {
+    if (!this.paused || this.status === 'cancelled') return;
     this.paused = false;
     this.status = 'running';
     await this.emit('run.resumed', 'Ejecución reanudada');
+  }
+
+  async cancel(reason = 'Ejecución detenida por el usuario'): Promise<void> {
+    if (['completed', 'cancelled', 'failed'].includes(this.status)) return;
+    this.paused = false;
+    this.status = 'cancelled';
+    this.controller.abort(reason);
+    await this.emit('run.cancelled', reason);
   }
 
   async block(reason: string, details: Record<string, unknown> = {}): Promise<void> {
@@ -140,6 +166,7 @@ export class TaskRunner {
   }
 
   private async assertCanExecute(action: ObservableAction): Promise<void> {
+    await this.checkpoint();
     if (!action.requiresApproval) return;
 
     this.status = 'waiting_approval';
@@ -159,11 +186,18 @@ export class TaskRunner {
     }
 
     this.status = 'running';
+    await this.checkpoint();
   }
 
-  private async waitWhilePaused(): Promise<void> {
+  private async checkpoint(): Promise<void> {
+    if (this.controller.signal.aborted || this.status === 'cancelled') {
+      throw new RunCancelledError();
+    }
     while (this.paused) {
       await new Promise((resolve) => setTimeout(resolve, 50));
+      if (this.controller.signal.aborted || this.status === 'cancelled') {
+        throw new RunCancelledError();
+      }
     }
   }
 
