@@ -24,7 +24,7 @@ button { -webkit-tap-highlight-color: transparent; }
   padding: max(18px, env(safe-area-inset-top)) 16px max(28px, env(safe-area-inset-bottom));
 }
 
-.topbar, .section-head, .command-actions, .event-meta {
+.topbar, .section-head, .command-actions, .event-meta, .capability-head, .capability-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -123,11 +123,43 @@ h2 { font-size: 20px; }
 .presence-state { font-size: 20px; font-weight: 750; letter-spacing: -.02em; }
 .transcript { margin-top: 7px; color: #aeb7c9; line-height: 1.45; font-size: 14px; }
 
-.command-card, .work {
+.capabilities, .command-card, .work {
   border: 1px solid rgba(255,255,255,.075);
   background: rgba(13,17,26,.86);
   border-radius: 22px;
 }
+
+.capabilities {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+.capability-head { align-items: flex-start; }
+.capability-legend { color: #657087; font-size: 11px; text-align: right; }
+.capability-list { display: grid; gap: 8px; margin-top: 14px; }
+.capability-row {
+  min-height: 54px;
+  padding: 10px 11px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.035);
+  border: 1px solid rgba(255,255,255,.05);
+}
+.capability-name { font-size: 13px; font-weight: 700; }
+.capability-detail { margin-top: 3px; color: #78839a; font-size: 11px; line-height: 1.35; }
+.capability-badge {
+  flex: none;
+  border-radius: 999px;
+  padding: 6px 9px;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .04em;
+  background: rgba(255,255,255,.06);
+  color: #9ca6ba;
+}
+.capability-row[data-state="available"] .capability-badge { color: #75e2a5; background: rgba(69,212,131,.09); }
+.capability-row[data-state="needs_auth"] .capability-badge { color: #f4c56a; background: rgba(245,181,69,.10); }
+.capability-row[data-state="disabled"] .capability-badge,
+.capability-row[data-state="unavailable"] .capability-badge { color: #ee858a; background: rgba(239,100,107,.09); }
+.capability-empty { color: #667086; font-size: 12px; }
 
 .command-card { padding: 14px; }
 textarea {
@@ -208,5 +240,7 @@ button:disabled { opacity: .45; cursor: default; }
   .orb-core { width: 46px; height: 46px; }
   .ring-a { width: 62px; height: 62px; }
   .ring-b { width: 76px; height: 76px; }
+  .capability-head { align-items: flex-start; }
+  .capability-legend { max-width: 112px; }
   h1 { font-size: 27px; }
 }
