@@ -32,6 +32,11 @@ export interface TranscriptEvent {
   language?: string;
 }
 
+export interface SpeechOutputChunk {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
 export interface SpeechToTextGateway {
   transcribeStream(
     chunks: AsyncIterable<SpeechInputChunk>,
@@ -39,7 +44,7 @@ export interface SpeechToTextGateway {
 }
 
 export interface TextToSpeechGateway {
-  synthesize(text: string, voiceId: string): AsyncIterable<Uint8Array>;
+  synthesize(text: string, voiceId: string): AsyncIterable<SpeechOutputChunk>;
 }
 
 export interface VoiceGateway extends SpeechToTextGateway, TextToSpeechGateway {}
