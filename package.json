@@ -9,8 +9,12 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "demo": "node --import tsx examples/observable-run.ts"
   },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }
