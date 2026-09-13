@@ -1,5 +1,12 @@
-const CACHE = 'janus-shell-v2';
-const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.webmanifest'];
+const CACHE = 'janus-shell-v3';
+const SHELL = [
+  '/',
+  '/index.html',
+  '/styles.css',
+  '/app.js',
+  '/pcm-capture-worklet.js',
+  '/manifest.webmanifest',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
