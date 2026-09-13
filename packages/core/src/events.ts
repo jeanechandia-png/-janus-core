@@ -4,6 +4,7 @@ export type RunStatus =
   | 'waiting_approval'
   | 'blocked'
   | 'paused'
+  | 'cancelled'
   | 'completed'
   | 'failed';
 
@@ -20,6 +21,7 @@ export type JanusEventType =
   | 'run.blocked'
   | 'run.paused'
   | 'run.resumed'
+  | 'run.cancelled'
   | 'run.completed'
   | 'run.failed';
 
