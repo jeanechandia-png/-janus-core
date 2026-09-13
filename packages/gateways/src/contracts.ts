@@ -32,12 +32,17 @@ export interface TranscriptEvent {
   language?: string;
 }
 
-export interface VoiceGateway {
+export interface SpeechToTextGateway {
   transcribeStream(
     chunks: AsyncIterable<SpeechInputChunk>,
   ): AsyncIterable<TranscriptEvent>;
+}
+
+export interface TextToSpeechGateway {
   synthesize(text: string, voiceId: string): AsyncIterable<Uint8Array>;
 }
+
+export interface VoiceGateway extends SpeechToTextGateway, TextToSpeechGateway {}
 
 export interface ToolRequest {
   tool: string;
