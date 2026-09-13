@@ -1,0 +1,25 @@
+{
+  "voices": {
+    "example-custom": {
+      "mode": "custom_voice",
+      "model_path": "/ABSOLUTE/LOCAL/PATH/Qwen3-TTS-CustomVoice",
+      "speaker": "REPLACE_WITH_SUPPORTED_SPEAKER",
+      "language": "Spanish",
+      "instruct": "Use the approved Janus VoiceSpec here."
+    },
+    "example-designed": {
+      "mode": "voice_design",
+      "model_path": "/ABSOLUTE/LOCAL/PATH/Qwen3-TTS-VoiceDesign",
+      "language": "Spanish",
+      "instruct": "Replace this example with an approved voice design specification."
+    },
+    "example-clone": {
+      "mode": "voice_clone",
+      "model_path": "/ABSOLUTE/LOCAL/PATH/Qwen3-TTS-Base",
+      "language": "Spanish",
+      "ref_audio": "/ABSOLUTE/LOCAL/PATH/reference.wav",
+      "ref_text": "Exact transcript of the local reference audio.",
+      "x_vector_only_mode": false
+    }
+  }
+}
