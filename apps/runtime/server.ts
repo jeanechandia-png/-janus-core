@@ -4,22 +4,30 @@ import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GitHubAdapter } from '../../packages/adapters/src/github-adapter.js';
 import { EventHub } from '../../packages/core/src/event-hub.js';
+import type { EventSink, RunSnapshot } from '../../packages/core/src/events.js';
 import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
 import { TaskRunner, type JanusStep } from '../../packages/core/src/task-runner.js';
-import type { EventSink, JanusEventType, RunSnapshot } from '../../packages/core/src/events.js';
 import { DefaultToolGateway } from '../../packages/gateways/src/tool-gateway.js';
-import type { ToolProgress, ToolRequest, ToolResult } from '../../packages/gateways/src/contracts.js';
+import { compilePlan } from '../../packages/orchestrator/src/compile-plan.js';
+import { deterministicPlan } from '../../packages/orchestrator/src/deterministic-planner.js';
+import { validatePlan, type JanusPlan } from '../../packages/orchestrator/src/plan.js';
 import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
 
 const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
 const dbPath = process.env.JANUS_DB ?? join(process.cwd(), 'data', 'janus.db');
+
 const hub = new EventHub();
 const store = new SqliteStore(dbPath);
 const runners = new Map<string, TaskRunner>();
 const toolGateway = new DefaultToolGateway();
 
 toolGateway.register(new GitHubAdapter({ token: process.env.GITHUB_TOKEN }));
+
+const allowedTools = new Set(['github']);
+const allowedActions = new Map([
+  ['github', new Set(['repo.get', 'contents.list', 'file.read'])],
+]);
 
 const voiceSessions = new VoiceSessionRegistry(() => ({
   start: async (text) => startRun(text, 'voice'),
@@ -35,13 +43,6 @@ if (interruptedRuns > 0) {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-interface GitHubTarget {
-  owner: string;
-  repo: string;
-  path?: string;
-  ref?: string;
-}
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -60,71 +61,6 @@ function json(response: ServerResponse, status: number, body: unknown): void {
   response.end(JSON.stringify(body));
 }
 
-function buildSteps(command: string): JanusStep[] {
-  const github = parseGitHubTarget(command);
-  if (github) return githubSteps(github);
-  return demoSteps(command);
-}
-
-function githubSteps(target: GitHubTarget): JanusStep[] {
-  let repository: Record<string, unknown> | undefined;
-  let contentSummary: Record<string, unknown> | undefined;
-
-  return [
-    {
-      id: 'github-repository',
-      label: `Revisar GitHub ${target.owner}/${target.repo}`,
-      run: async ({ emit, checkpoint }) => {
-        await checkpoint();
-        const result = await executeObservableTool(
-          {
-            tool: 'github',
-            action: 'repo.get',
-            input: { owner: target.owner, repo: target.repo },
-          },
-          emit,
-          checkpoint,
-        );
-        repository = result.output;
-      },
-    },
-    {
-      id: 'github-content',
-      label: target.path ? `Leer ${target.path}` : 'Listar contenido principal',
-      run: async ({ emit, checkpoint }) => {
-        await checkpoint();
-        const action = target.path ? 'file.read' : 'contents.list';
-        const input: Record<string, unknown> = {
-          owner: target.owner,
-          repo: target.repo,
-        };
-        if (target.path) input.path = target.path;
-        if (target.ref) input.ref = target.ref;
-
-        const result = await executeObservableTool(
-          { tool: 'github', action, input },
-          emit,
-          checkpoint,
-        );
-        contentSummary = result.output;
-      },
-    },
-    {
-      id: 'github-result',
-      label: 'Mostrar resultado verificable',
-      run: async ({ emit, checkpoint }) => {
-        await checkpoint();
-        const preview = summarizeGitHubResult(target, repository, contentSummary);
-        await emit('artifact.updated', 'GitHub revisado', {
-          preview,
-          repository,
-          content: compactContent(contentSummary),
-        });
-      },
-    },
-  ];
-}
-
 function demoSteps(command: string): JanusStep[] {
   return [
     {
@@ -133,127 +69,44 @@ function demoSteps(command: string): JanusStep[] {
       run: async ({ emit, checkpoint }) => {
         await checkpoint();
         await emit('tool.started', 'Analizando la solicitud', { command }, 'model');
-        await sleep(300);
+        await sleep(250);
         await checkpoint();
-        await emit('tool.progress', 'Objetivo y contexto identificados', { percent: 100 }, 'model');
-        await emit('tool.completed', 'Solicitud preparada para ejecución', {}, 'model');
-      },
-    },
-    {
-      id: 'work',
-      label: 'Ejecutar trabajo',
-      run: async ({ emit, checkpoint }) => {
-        await checkpoint();
-        await emit('tool.started', 'Abriendo herramientas necesarias', { tool: 'tool-gateway' }, 'tool');
-        await sleep(350);
-        await checkpoint();
-        await emit('tool.progress', 'Consultando fuentes / archivos', { percent: 35 }, 'tool');
-        await sleep(350);
-        await checkpoint();
-        await emit('tool.progress', 'Procesando resultados', { percent: 70 }, 'tool');
-        await sleep(350);
-        await checkpoint();
-        await emit('tool.completed', 'Trabajo de herramientas completado', { percent: 100 }, 'tool');
+        await emit('tool.progress', 'Objetivo identificado; aún no hay adaptador real para esta acción', {
+          percent: 100,
+        }, 'model');
+        await emit('tool.completed', 'Solicitud clasificada', {}, 'model');
       },
     },
     {
       id: 'deliver',
-      label: 'Preparar resultado',
+      label: 'Mostrar estado',
       run: async ({ emit, checkpoint }) => {
         await checkpoint();
-        await emit('artifact.updated', 'Resultado actualizado y listo para mostrar', {
-          preview: `Janus procesó: ${command}`,
+        await emit('artifact.updated', 'Janus necesita un adaptador para ejecutar esta tarea', {
+          preview: 'El Core entendió la orden, pero todavía no existe una herramienta real autorizada para ejecutarla.',
         });
       },
     },
   ];
 }
 
-async function executeObservableTool(
-  request: ToolRequest,
-  emit: (
-    type: JanusEventType,
-    summary: string,
-    payload?: Record<string, unknown>,
-    source?: 'core' | 'model' | 'voice' | 'tool' | 'ui' | 'system',
-  ) => Promise<void>,
-  checkpoint: () => Promise<void>,
-): Promise<ToolResult> {
-  const result = await toolGateway.execute(request, async (progress: ToolProgress) => {
-    await checkpoint();
-    const eventType = progressEventType(progress.phase);
-    await emit(eventType, progress.message, {
-      tool: request.tool,
-      action: request.action,
-      percent: progress.percent,
-      ...(progress.data ?? {}),
-    }, 'tool');
+function preparePlan(command: string): { plan: JanusPlan; steps: JanusStep[] } | null {
+  const plan = deterministicPlan(command);
+  if (!plan) return null;
+
+  const validation = validatePlan(plan, {
+    allowedTools,
+    allowedActions,
   });
 
-  if (!result.ok) {
-    throw new Error(result.error ?? `${request.tool}.${request.action} failed`);
-  }
-  return result;
-}
-
-function progressEventType(phase: ToolProgress['phase']): JanusEventType {
-  if (phase === 'started') return 'tool.started';
-  if (phase === 'completed') return 'tool.completed';
-  return 'tool.progress';
-}
-
-function parseGitHubTarget(command: string): GitHubTarget | null {
-  const urlMatch = command.match(
-    /https?:\/\/(?:www\.)?github\.com\/(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)(?:\/blob\/(?<ref>[^/\s]+)\/(?<path>[^\s?#]+))?/i,
-  );
-  if (urlMatch?.groups?.owner && urlMatch.groups.repo) {
-    return {
-      owner: urlMatch.groups.owner,
-      repo: urlMatch.groups.repo.replace(/\.git$/i, ''),
-      ref: urlMatch.groups.ref,
-      path: urlMatch.groups.path,
-    };
+  if (!validation.ok) {
+    throw new Error(`Plan rejected by Janus Core: ${validation.errors.join('; ')}`);
   }
 
-  const shortMatch = command.match(
-    /\bgithub\s+(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)(?:\s+(?<path>\S+))?/i,
-  );
-  if (shortMatch?.groups?.owner && shortMatch.groups.repo) {
-    return {
-      owner: shortMatch.groups.owner,
-      repo: shortMatch.groups.repo.replace(/\.git$/i, ''),
-      path: shortMatch.groups.path,
-    };
-  }
-
-  return null;
-}
-
-function summarizeGitHubResult(
-  target: GitHubTarget,
-  repository?: Record<string, unknown>,
-  content?: Record<string, unknown>,
-): string {
-  const visibility = repository?.private === true ? 'privado' : 'público';
-  const branch = typeof repository?.defaultBranch === 'string' ? repository.defaultBranch : 'desconocida';
-  if (target.path && typeof content?.content === 'string') {
-    const text = content.content as string;
-    return `${target.owner}/${target.repo} (${visibility}, rama ${branch}) · ${target.path} leído · ${text.length} caracteres.`;
-  }
-  const entries = Array.isArray(content?.entries) ? content.entries.length : 0;
-  return `${target.owner}/${target.repo} (${visibility}, rama ${branch}) · ${entries} entradas visibles en la ruta principal.`;
-}
-
-function compactContent(content?: Record<string, unknown>): Record<string, unknown> | undefined {
-  if (!content) return undefined;
-  if (typeof content.content === 'string') {
-    return {
-      ...content,
-      content: content.content.slice(0, 4000),
-      truncated: content.content.length > 4000,
-    };
-  }
-  return content;
+  return {
+    plan,
+    steps: compilePlan(plan, { toolGateway }),
+  };
 }
 
 function startRun(command: string, inputMode: 'voice' | 'text'): string {
@@ -268,21 +121,54 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
     sink: durableSink,
     approvalHandler: async (action) => ({
       approved: action.risk === 'none' || action.risk === 'low',
-      reason: action.risk === 'high' ? 'La acción de alto riesgo requiere aprobación explícita.' : undefined,
+      reason: action.risk === 'high'
+        ? 'La acción de alto riesgo requiere aprobación explícita.'
+        : undefined,
     }),
   });
 
   const runId = runner.snapshot().runId;
   runners.set(runId, runner);
   store.upsertRun(runner.snapshot());
-
   const activeRunner = runner;
+
   setTimeout(() => {
     void (async () => {
       await activeRunner.heard(inputMode);
-      const snapshot = await activeRunner.execute(buildSteps(command));
+
+      let steps: JanusStep[];
+      try {
+        const prepared = preparePlan(command);
+        if (prepared) {
+          await durableSink({
+            id: `evt_plan_${crypto.randomUUID()}`,
+            runId,
+            seq: activeRunner.snapshot().lastEventSeq + 1,
+            type: 'artifact.updated',
+            at: new Date().toISOString(),
+            source: 'core',
+            summary: 'Plan validado por Janus Core',
+            payload: {
+              preview: `${prepared.plan.steps.length} pasos autorizados · fuente ${prepared.plan.source}`,
+              planVersion: prepared.plan.version,
+              source: prepared.plan.source,
+            },
+          });
+          steps = prepared.steps;
+        } else {
+          steps = demoSteps(command);
+        }
+      } catch (error) {
+        await activeRunner.block('Janus Core rechazó el plan antes de ejecutar herramientas', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        finishRun(activeRunner.snapshot());
+        return;
+      }
+
+      const snapshot = await activeRunner.execute(steps);
       finishRun(snapshot);
-    })().catch((error) => {
+    })().catch(async (error) => {
       console.error('run failed', error);
       voiceSessions.runBlocked(runId);
       runners.delete(runId);
@@ -373,6 +259,7 @@ const server = createServer(async (request, response) => {
       durable: true,
       db: dbPath === ':memory:' ? 'memory' : 'sqlite',
       voiceSessionAuthority: 'core',
+      planner: 'core-validated',
       tools: {
         github: ['repo.get', 'contents.list', 'file.read'],
       },
@@ -388,12 +275,11 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/command') {
     const body = await readJson(request);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
-    const inputMode = body.inputMode === 'voice' ? 'voice' : 'text';
     if (!text) {
       json(response, 400, { ok: false, error: 'text is required' });
       return;
     }
-    const runId = startRun(text, inputMode);
+    const runId = startRun(text, body.inputMode === 'voice' ? 'voice' : 'text');
     json(response, 202, { ok: true, runId });
     return;
   }
@@ -416,10 +302,7 @@ const server = createServer(async (request, response) => {
       });
       json(response, 200, { ok: true, result, session: session.snapshot() });
     } catch (error) {
-      json(response, 409, {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      json(response, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
     return;
   }
@@ -454,7 +337,10 @@ const server = createServer(async (request, response) => {
   const voiceSessionId = voiceSessionMatch?.[1];
   if (request.method === 'GET' && voiceSessionId) {
     try {
-      json(response, 200, { ok: true, session: voiceSessions.get(decodeURIComponent(voiceSessionId)).snapshot() });
+      json(response, 200, {
+        ok: true,
+        session: voiceSessions.get(decodeURIComponent(voiceSessionId)).snapshot(),
+      });
     } catch (error) {
       json(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
@@ -476,11 +362,14 @@ const server = createServer(async (request, response) => {
 
   const control = url.pathname.match(/^\/api\/runs\/([^/]+)\/(pause|resume|cancel)$/);
   const controlRunId = control?.[1];
-  const controlAction = control?.[2];
+  const controlAction = control?.[2] as 'pause' | 'resume' | 'cancel' | undefined;
   if (request.method === 'POST' && controlRunId && controlAction) {
     try {
-      await controlActiveRun(controlRunId, controlAction as 'pause' | 'resume' | 'cancel');
-      json(response, 200, { ok: true, snapshot: runners.get(controlRunId)?.snapshot() ?? store.getRun(controlRunId) });
+      await controlActiveRun(controlRunId, controlAction);
+      json(response, 200, {
+        ok: true,
+        snapshot: runners.get(controlRunId)?.snapshot() ?? store.getRun(controlRunId),
+      });
     } catch (error) {
       json(response, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
