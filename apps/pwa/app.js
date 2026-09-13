@@ -10,6 +10,10 @@ const pauseButton = document.querySelector('#pauseButton');
 const stopButton = document.querySelector('#stopButton');
 const clearButton = document.querySelector('#clearButton');
 
+const storedVoiceSessionId = localStorage.getItem('janus.voiceSessionId');
+const voiceSessionId = storedVoiceSessionId || `iphone_${crypto.randomUUID()}`;
+if (!storedVoiceSessionId) localStorage.setItem('janus.voiceSessionId', voiceSessionId);
+
 let currentRunId = null;
 let currentRunActive = false;
 let paused = false;
@@ -67,7 +71,11 @@ function renderEvent(event) {
   const node = template.content.firstElementChild.cloneNode(true);
   node.dataset.state = eventState(event.type);
   node.querySelector('.event-source').textContent = `${event.source} · ${event.type}`;
-  node.querySelector('.event-time').textContent = new Date(event.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  node.querySelector('.event-time').textContent = new Date(event.at).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
   node.querySelector('.event-summary').textContent = event.summary;
   node.querySelector('.event-detail').textContent = detailFrom(event);
   activity.append(node);
@@ -107,8 +115,11 @@ function connectEvents(runId) {
   events.onopen = () => setConnection(true);
   events.onerror = () => setConnection(false);
   events.onmessage = (message) => {
-    try { renderEvent(JSON.parse(message.data)); }
-    catch (error) { console.error('invalid event', error); }
+    try {
+      renderEvent(JSON.parse(message.data));
+    } catch (error) {
+      console.error('invalid event', error);
+    }
   };
 }
 
@@ -121,7 +132,14 @@ async function checkHealth() {
   }
 }
 
-async function submit(text, inputMode = 'text') {
+function activateRun(runId) {
+  currentRunId = runId;
+  paused = false;
+  setRunControls(true);
+  connectEvents(runId);
+}
+
+async function submit(text) {
   const clean = text.trim();
   if (!clean) return;
 
@@ -134,19 +152,44 @@ async function submit(text, inputMode = 'text') {
     const response = await fetch('/api/command', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: clean, inputMode }),
+      body: JSON.stringify({ text: clean, inputMode: 'text' }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error ?? 'No se pudo iniciar');
-    currentRunId = data.runId;
-    paused = false;
-    setRunControls(true);
-    connectEvents(currentRunId);
+    activateRun(data.runId);
     command.value = '';
   } catch (error) {
     setPresence('Error', error.message);
   } finally {
     sendButton.disabled = false;
+  }
+}
+
+async function submitVoice(text) {
+  const clean = text.trim();
+  if (!clean) return;
+
+  try {
+    const response = await fetch('/api/voice/utterance', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: voiceSessionId,
+        text: clean,
+        final: true,
+        language: 'es-ES',
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? 'No se pudo procesar la voz');
+
+    if (data.result?.kind === 'task' && data.result.runId) {
+      activity.classList.remove('empty');
+      activity.innerHTML = '';
+      activateRun(data.result.runId);
+    }
+  } catch (error) {
+    setPresence('Voz', error.message);
   }
 }
 
@@ -159,9 +202,21 @@ async function controlRun(action) {
   }
 }
 
-sendButton.addEventListener('click', () => submit(command.value, 'text'));
+async function syncMicrophone(state) {
+  try {
+    await fetch('/api/voice/microphone', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: voiceSessionId, state }),
+    });
+  } catch {
+    // La UI puede seguir intentando recuperar la conexión de voz.
+  }
+}
+
+sendButton.addEventListener('click', () => submit(command.value));
 command.addEventListener('keydown', (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') submit(command.value, 'text');
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') submit(command.value);
 });
 
 pauseButton.addEventListener('click', () => controlRun(paused ? 'resume' : 'pause'));
@@ -172,36 +227,10 @@ clearButton.addEventListener('click', () => {
   activity.innerHTML = '<div class="empty-state">Vista limpia. El historial de ejecución sigue guardado en Janus Core.</div>';
 });
 
-function normalizeVoiceIntent(text) {
-  return text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[.!?,;:]+$/g, '')
-    .trim();
-}
-
-function handleVoiceText(text) {
-  const intent = normalizeVoiceIntent(text);
-  if (currentRunActive && /^(janus\s+)?(pausa|pausar|espera)$/.test(intent)) {
-    controlRun('pause');
-    return;
-  }
-  if (currentRunActive && /^(janus\s+)?(continua|continuar|sigue|reanuda|reanudar)$/.test(intent)) {
-    controlRun('resume');
-    return;
-  }
-  if (currentRunActive && /^(janus\s+)?(para|detente|detener|cancela|cancelar)$/.test(intent)) {
-    controlRun('cancel');
-    return;
-  }
-  submit(text, 'voice');
-}
-
 function configureSpeechRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    transcript.textContent = 'Este navegador no expone reconocimiento de voz directo. Puedes escribir el comando; el Voice Gateway nativo se conectará en la siguiente fase.';
+    transcript.textContent = 'Este navegador no expone reconocimiento de voz directo. Puedes escribir el comando; el Voice Gateway streaming sustituirá este prototipo.';
     voiceButton.disabled = true;
     return;
   }
@@ -213,8 +242,9 @@ function configureSpeechRecognition() {
 
   recognition.onstart = () => {
     listening = true;
+    void syncMicrophone('connected');
     voiceButton.classList.add('listening');
-    setPresence('Escuchando', 'Habla con normalidad.');
+    setPresence('Escuchando', 'Habla con normalidad. La ejecución no necesita salir del modo de voz.');
   };
 
   recognition.onresult = (event) => {
@@ -224,7 +254,7 @@ function configureSpeechRecognition() {
       const text = result[0].transcript.trim();
       if (result.isFinal) {
         transcript.textContent = text;
-        handleVoiceText(text);
+        void submitVoice(text);
       } else {
         interim += `${text} `;
       }
@@ -233,14 +263,22 @@ function configureSpeechRecognition() {
   };
 
   recognition.onerror = (event) => {
-    if (event.error !== 'no-speech') setPresence('Voz', `Reconocimiento: ${event.error}`);
+    if (event.error !== 'no-speech') {
+      setPresence('Reconectando voz', `Micrófono: ${event.error}. Janus mantiene la ejecución activa.`);
+    }
   };
 
   recognition.onend = () => {
     voiceButton.classList.remove('listening');
     if (listening) {
-      try { recognition.start(); }
-      catch { listening = false; }
+      try {
+        recognition.start();
+      } catch {
+        listening = false;
+        void syncMicrophone('disconnected');
+      }
+    } else {
+      void syncMicrophone('disconnected');
     }
   };
 }
@@ -251,11 +289,16 @@ voiceButton.addEventListener('click', () => {
     listening = false;
     recognition.stop();
     voiceButton.classList.remove('listening');
-    setPresence('Listo', 'Micrófono en pausa. Toca para volver a escuchar.');
+    void syncMicrophone('disconnected');
+    setPresence('Listo', 'Micrófono en pausa. La tarea activa puede seguir trabajando.');
   } else {
     listening = true;
-    try { recognition.start(); }
-    catch { listening = false; }
+    try {
+      recognition.start();
+    } catch {
+      listening = false;
+      setPresence('Voz', 'No se pudo abrir el micrófono. La ejecución de Janus sigue disponible por texto.');
+    }
   }
 });
 
