@@ -24,6 +24,7 @@ import {
 } from '../../packages/security/src/credential-provider.js';
 import { CompositeVoiceGateway } from '../../packages/voice/src/composite-gateway.js';
 import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
+import { safeSpokenRunSummary } from '../../packages/voice/src/run-response.js';
 import { VoiceStreamServer } from '../../packages/voice/src/websocket-transport.js';
 
 const port = Number(process.env.PORT ?? 8787);
@@ -268,7 +269,7 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
       const snapshot = await activeRunner.execute(steps);
       finishRun(snapshot);
     })().catch((error) => {
-      console.error('run failed', error);
+      console.error('run failed', error instanceof Error ? error.message : String(error));
       voiceSessions.runBlocked(runId);
       runners.delete(runId);
     });
@@ -515,12 +516,28 @@ const voiceStream = voiceGateway
     })
   : undefined;
 
+const voiceResponseUnsubscribe = voiceStream
+  ? hub.subscribe((event) => {
+      if (event.type !== 'run.completed' && event.type !== 'run.blocked' && event.type !== 'run.failed') return;
+      const sessionId = voiceSessions.sessionIdForRun(event.runId);
+      const snapshot = runners.get(event.runId)?.snapshot();
+      if (!sessionId || !snapshot) return;
+
+      const spoken = safeSpokenRunSummary(snapshot, store.listEvents(event.runId));
+      if (!spoken) return;
+      void voiceStream.speak(sessionId, spoken).catch((error) => {
+        console.error('voice response failed', error instanceof Error ? error.message : String(error));
+      });
+    })
+  : undefined;
+
 let shuttingDown = false;
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  voiceResponseUnsubscribe?.();
   void (async () => {
-    await voiceStream?.close().catch((error) => console.error('voice shutdown failed', error));
+    await voiceStream?.close().catch((error) => console.error('voice shutdown failed', error instanceof Error ? error.message : String(error)));
     server.close(() => {
       store.close();
       process.exit(0);
