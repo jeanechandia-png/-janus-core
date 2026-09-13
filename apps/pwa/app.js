@@ -15,12 +15,31 @@ const storedVoiceSessionId = localStorage.getItem('janus.voiceSessionId');
 const voiceSessionId = storedVoiceSessionId || `iphone_${crypto.randomUUID()}`;
 if (!storedVoiceSessionId) localStorage.setItem('janus.voiceSessionId', voiceSessionId);
 
+const PCM_MIME_TYPE = 'audio/pcm;rate=16000;channels=1;format=s16le';
+const VAD_START_RMS = 0.025;
+const VAD_END_RMS = 0.012;
+const VAD_START_FRAMES = 2;
+const VAD_END_FRAMES = 25;
+
 let currentRunId = null;
 let currentRunActive = false;
 let paused = false;
 let listening = false;
 let recognition = null;
+let recognitionConfigured = false;
 let events = null;
+let voiceMode = 'pending';
+let voiceSocket = null;
+let audioContext = null;
+let mediaStream = null;
+let captureSource = null;
+let captureNode = null;
+let muteNode = null;
+let pcmStarting = false;
+let speechActive = false;
+let speechFrames = 0;
+let silenceFrames = 0;
+let ttsActive = false;
 
 function setConnection(online) {
   connection.classList.toggle('online', online);
@@ -186,6 +205,31 @@ function capabilityStateLabel(state) {
   return 'No disponible';
 }
 
+function supportsPcmStreaming() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  return Boolean(
+    window.WebSocket
+    && navigator.mediaDevices?.getUserMedia
+    && AudioContextClass
+    && window.AudioWorkletNode,
+  );
+}
+
+function configureVoiceMode(health) {
+  const streamingState = health?.voice?.streaming?.state;
+  if (streamingState === 'available' && supportsPcmStreaming()) {
+    voiceMode = 'pcm-stream';
+    voiceButton.disabled = false;
+    if (!listening) {
+      setPresence('Listo', 'Voz PCM streaming lista. Toca el núcleo y habla con Janus.');
+    }
+    return;
+  }
+
+  if (!recognitionConfigured) configureSpeechRecognition();
+  if (voiceMode === 'pending') voiceMode = recognition ? 'browser-fallback' : 'text-only';
+}
+
 async function checkHealth() {
   try {
     const response = await fetch('/health', { cache: 'no-store' });
@@ -193,9 +237,13 @@ async function checkHealth() {
     if (!response.ok) throw new Error('Core no disponible');
     const health = await response.json();
     renderCapabilities(health.capabilities);
+    configureVoiceMode(health);
+    return health;
   } catch {
     setConnection(false);
     renderCapabilities([]);
+    if (!recognitionConfigured) configureSpeechRecognition();
+    return null;
   }
 }
 
@@ -226,7 +274,7 @@ async function submit(text) {
     activateRun(data.runId);
     command.value = '';
   } catch (error) {
-    setPresence('Error', error.message);
+    setPresence('Error', error?.message ?? String(error));
   } finally {
     sendButton.disabled = false;
   }
@@ -256,7 +304,7 @@ async function submitVoice(text) {
       activateRun(data.result.runId);
     }
   } catch (error) {
-    setPresence('Voz', error.message);
+    setPresence('Voz', error?.message ?? String(error));
   }
 }
 
@@ -277,7 +325,246 @@ async function syncMicrophone(state) {
       body: JSON.stringify({ sessionId: voiceSessionId, state }),
     });
   } catch {
-    // La UI puede seguir intentando recuperar la conexión de voz.
+    // El fallback puede seguir intentando recuperar la conexión de voz.
+  }
+}
+
+function voiceSocketUrl() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}/api/voice/stream`;
+}
+
+async function connectPcmSocket() {
+  const socket = new WebSocket(voiceSocketUrl());
+  socket.binaryType = 'arraybuffer';
+  voiceSocket = socket;
+  socket.addEventListener('message', handleVoiceStreamMessage);
+  socket.addEventListener('close', () => {
+    if (voiceSocket === socket) voiceSocket = null;
+    if (listening && voiceMode === 'pcm-stream') {
+      void stopPcmVoice({ preserveMessage: true });
+      setPresence('Voz desconectada', 'El canal de voz se cerró. La tarea activa sigue en Janus Core.');
+    }
+  });
+
+  await waitForSocketOpen(socket);
+  socket.send(JSON.stringify({
+    type: 'hello',
+    version: 1,
+    sessionId: voiceSessionId,
+    audio: { mimeType: PCM_MIME_TYPE },
+  }));
+  await waitForVoiceReady(socket);
+  return socket;
+}
+
+function waitForSocketOpen(socket) {
+  if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Tiempo agotado al abrir el canal de voz.')), 5000);
+    const onOpen = () => {
+      clearTimeout(timer);
+      socket.removeEventListener('error', onError);
+      resolve();
+    };
+    const onError = () => {
+      clearTimeout(timer);
+      socket.removeEventListener('open', onOpen);
+      reject(new Error('No se pudo abrir el canal de voz.'));
+    };
+    socket.addEventListener('open', onOpen, { once: true });
+    socket.addEventListener('error', onError, { once: true });
+  });
+}
+
+function waitForVoiceReady(socket) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.removeEventListener('message', onMessage);
+      reject(new Error('Voice Gateway no confirmó disponibilidad.'));
+    }, 5000);
+    const onMessage = (event) => {
+      if (typeof event.data !== 'string') return;
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (message.type === 'ready') {
+        clearTimeout(timer);
+        socket.removeEventListener('message', onMessage);
+        resolve(message);
+      } else if (message.type === 'error') {
+        clearTimeout(timer);
+        socket.removeEventListener('message', onMessage);
+        reject(new Error(message.message ?? 'Voice Gateway no disponible.'));
+      }
+    };
+    socket.addEventListener('message', onMessage);
+  });
+}
+
+function handleVoiceStreamMessage(event) {
+  if (typeof event.data !== 'string') {
+    // El reproductor TTS streaming se conecta en la siguiente fase. No persistimos audio recibido.
+    return;
+  }
+
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+
+  if (message.type === 'transcript.partial' && typeof message.text === 'string') {
+    transcript.textContent = message.text;
+    return;
+  }
+  if (message.type === 'transcript.final' && typeof message.text === 'string') {
+    transcript.textContent = message.text;
+    return;
+  }
+  if (message.type === 'session.action' && message.result?.kind === 'task' && message.result.runId) {
+    activity.classList.remove('empty');
+    activity.innerHTML = '';
+    activateRun(message.result.runId);
+    return;
+  }
+  if (message.type === 'speech.started') {
+    ttsActive = true;
+    setPresence('Janus hablando', 'Puedes interrumpir hablando; la tarea no se detendrá.');
+    return;
+  }
+  if (message.type === 'speech.completed' || message.type === 'speech.interrupted') {
+    ttsActive = false;
+    if (listening) setPresence('Escuchando', 'Canal de voz activo.');
+    return;
+  }
+  if (message.type === 'voice.error' || message.type === 'error') {
+    setPresence('Voz', message.message ?? 'El canal de voz informó un error.');
+  }
+}
+
+async function startPcmVoice() {
+  if (pcmStarting || listening) return;
+  pcmStarting = true;
+  voiceButton.disabled = true;
+  setPresence('Conectando voz', 'Abriendo canal PCM seguro con Janus Core…');
+
+  try {
+    const socket = await connectPcmSocket();
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AudioContextClass({ sampleRate: 16000, latencyHint: 'interactive' });
+    await audioContext.audioWorklet.addModule('/pcm-capture-worklet.js');
+
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+
+    captureSource = audioContext.createMediaStreamSource(mediaStream);
+    captureNode = new AudioWorkletNode(audioContext, 'janus-pcm-capture', {
+      processorOptions: { targetSampleRate: 16000, frameMs: 20 },
+    });
+    muteNode = audioContext.createGain();
+    muteNode.gain.value = 0;
+    captureSource.connect(captureNode).connect(muteNode).connect(audioContext.destination);
+    captureNode.port.onmessage = (event) => handlePcmFrame(event, socket);
+    await audioContext.resume();
+
+    listening = true;
+    speechActive = false;
+    speechFrames = 0;
+    silenceFrames = 0;
+    voiceButton.classList.add('listening');
+    setPresence('Escuchando', 'PCM16 · 16 kHz · mono. La sesión permanece en Janus Core.');
+  } catch (error) {
+    await stopPcmVoice({ preserveMessage: true });
+    setPresence('Voz', error?.message ?? String(error));
+  } finally {
+    pcmStarting = false;
+    voiceButton.disabled = false;
+  }
+}
+
+function handlePcmFrame(event, socket) {
+  const data = event.data;
+  if (!data || data.type !== 'pcm' || !(data.pcm instanceof ArrayBuffer)) return;
+  if (!listening || socket.readyState !== WebSocket.OPEN) return;
+
+  updateLocalVad(Number(data.rms), socket);
+  socket.send(data.pcm);
+}
+
+function updateLocalVad(rms, socket) {
+  const level = Number.isFinite(rms) ? rms : 0;
+  if (!speechActive) {
+    speechFrames = level >= VAD_START_RMS ? speechFrames + 1 : 0;
+    if (speechFrames >= VAD_START_FRAMES) {
+      speechActive = true;
+      silenceFrames = 0;
+      socket.send(JSON.stringify({ type: 'speech.start' }));
+      if (ttsActive) setPresence('Interrumpiendo', 'Te escucho; corto la salida de voz y mantengo la tarea activa.');
+    }
+    return;
+  }
+
+  if (level <= VAD_END_RMS) {
+    silenceFrames += 1;
+  } else {
+    silenceFrames = 0;
+  }
+
+  if (silenceFrames >= VAD_END_FRAMES) {
+    speechActive = false;
+    speechFrames = 0;
+    silenceFrames = 0;
+    socket.send(JSON.stringify({ type: 'speech.end' }));
+  }
+}
+
+async function stopPcmVoice(options = {}) {
+  listening = false;
+  voiceButton.classList.remove('listening');
+
+  const socket = voiceSocket;
+  if (socket?.readyState === WebSocket.OPEN && speechActive) {
+    socket.send(JSON.stringify({ type: 'speech.end' }));
+  }
+  speechActive = false;
+  speechFrames = 0;
+  silenceFrames = 0;
+  ttsActive = false;
+
+  captureNode?.disconnect();
+  captureSource?.disconnect();
+  muteNode?.disconnect();
+  captureNode = null;
+  captureSource = null;
+  muteNode = null;
+
+  if (mediaStream) {
+    for (const track of mediaStream.getTracks()) track.stop();
+    mediaStream = null;
+  }
+
+  if (audioContext) {
+    await audioContext.close().catch(() => undefined);
+    audioContext = null;
+  }
+
+  if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'microphone paused');
+  if (voiceSocket === socket) voiceSocket = null;
+
+  if (!options.preserveMessage) {
+    setPresence('Listo', 'Micrófono en pausa. La tarea activa puede seguir trabajando.');
   }
 }
 
@@ -295,13 +582,17 @@ clearButton.addEventListener('click', () => {
 });
 
 function configureSpeechRecognition() {
+  if (recognitionConfigured) return;
+  recognitionConfigured = true;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    transcript.textContent = 'Este navegador no expone reconocimiento de voz directo. Puedes escribir el comando; el Voice Gateway streaming sustituirá este prototipo.';
+    voiceMode = 'text-only';
+    transcript.textContent = 'El Voice Gateway local aún no está disponible y este navegador no ofrece fallback de reconocimiento. Puedes usar texto.';
     voiceButton.disabled = true;
     return;
   }
 
+  voiceMode = 'browser-fallback';
   recognition = new SpeechRecognition();
   recognition.lang = 'es-ES';
   recognition.continuous = true;
@@ -311,7 +602,7 @@ function configureSpeechRecognition() {
     listening = true;
     void syncMicrophone('connected');
     voiceButton.classList.add('listening');
-    setPresence('Escuchando', 'Habla con normalidad. La ejecución no necesita salir del modo de voz.');
+    setPresence('Escuchando', 'Fallback del navegador activo; Janus migrará a PCM local cuando el Voice Gateway esté disponible.');
   };
 
   recognition.onresult = (event) => {
@@ -351,6 +642,15 @@ function configureSpeechRecognition() {
 }
 
 voiceButton.addEventListener('click', () => {
+  if (voiceMode === 'pcm-stream') {
+    if (listening) {
+      void stopPcmVoice();
+    } else {
+      void startPcmVoice();
+    }
+    return;
+  }
+
   if (!recognition) return;
   if (listening) {
     listening = false;
@@ -369,7 +669,6 @@ voiceButton.addEventListener('click', () => {
   }
 });
 
-configureSpeechRecognition();
 void checkHealth();
 
 if ('serviceWorker' in navigator) {
