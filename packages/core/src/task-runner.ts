@@ -49,11 +49,12 @@ export class TaskRunner {
   private readonly runId = `run_${randomUUID()}`;
   private readonly startedAt: string;
   private updatedAt: string;
+  private readonly goal: string;
+  private readonly options: TaskRunnerOptions;
 
-  constructor(
-    private readonly goal: string,
-    private readonly options: TaskRunnerOptions,
-  ) {
+  constructor(goal: string, options: TaskRunnerOptions) {
+    this.goal = goal;
+    this.options = options;
     const now = this.now();
     this.startedAt = now;
     this.updatedAt = now;
