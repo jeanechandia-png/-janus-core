@@ -1,3 +1,5 @@
+import { PcmTtsPlayer } from './pcm-tts-player.js';
+
 const activity = document.querySelector('#activity');
 const template = document.querySelector('#eventTemplate');
 const connection = document.querySelector('#connection');
@@ -20,6 +22,7 @@ const VAD_START_RMS = 0.025;
 const VAD_END_RMS = 0.012;
 const VAD_START_FRAMES = 2;
 const VAD_END_FRAMES = 25;
+const ttsPlayer = new PcmTtsPlayer();
 
 let currentRunId = null;
 let currentRunActive = false;
@@ -40,6 +43,7 @@ let speechActive = false;
 let speechFrames = 0;
 let silenceFrames = 0;
 let ttsActive = false;
+let pendingTtsAudioMeta = [];
 
 function setConnection(online) {
   connection.classList.toggle('online', online);
@@ -341,6 +345,8 @@ async function connectPcmSocket() {
   socket.addEventListener('message', handleVoiceStreamMessage);
   socket.addEventListener('close', () => {
     if (voiceSocket === socket) voiceSocket = null;
+    ttsPlayer.interrupt();
+    pendingTtsAudioMeta = [];
     if (listening && voiceMode === 'pcm-stream') {
       void stopPcmVoice({ preserveMessage: true });
       setPresence('Voz desconectada', 'El canal de voz se cerró. La tarea activa sigue en Janus Core.');
@@ -407,7 +413,11 @@ function waitForVoiceReady(socket) {
 
 function handleVoiceStreamMessage(event) {
   if (typeof event.data !== 'string') {
-    // El reproductor TTS streaming se conecta en la siguiente fase. No persistimos audio recibido.
+    const meta = pendingTtsAudioMeta.shift();
+    if (!meta || !(event.data instanceof ArrayBuffer)) return;
+    void ttsPlayer.enqueue(event.data, meta.mimeType).catch((error) => {
+      setPresence('Audio', error?.message ?? String(error));
+    });
     return;
   }
 
@@ -437,7 +447,22 @@ function handleVoiceStreamMessage(event) {
     setPresence('Janus hablando', 'Puedes interrumpir hablando; la tarea no se detendrá.');
     return;
   }
-  if (message.type === 'speech.completed' || message.type === 'speech.interrupted') {
+  if (message.type === 'speech.audio' && typeof message.mimeType === 'string') {
+    pendingTtsAudioMeta.push({
+      sequence: message.sequence,
+      mimeType: message.mimeType,
+      byteLength: message.byteLength,
+    });
+    return;
+  }
+  if (message.type === 'speech.interrupted') {
+    ttsActive = false;
+    ttsPlayer.interrupt();
+    pendingTtsAudioMeta = [];
+    if (listening) setPresence('Escuchando', 'Interrupción aplicada. Canal de voz activo.');
+    return;
+  }
+  if (message.type === 'speech.completed') {
     ttsActive = false;
     if (listening) setPresence('Escuchando', 'Canal de voz activo.');
     return;
@@ -510,8 +535,12 @@ function updateLocalVad(rms, socket) {
     if (speechFrames >= VAD_START_FRAMES) {
       speechActive = true;
       silenceFrames = 0;
+      if (ttsActive) {
+        ttsPlayer.interrupt();
+        pendingTtsAudioMeta = [];
+        setPresence('Interrumpiendo', 'Te escucho; corto la salida de voz y mantengo la tarea activa.');
+      }
       socket.send(JSON.stringify({ type: 'speech.start' }));
-      if (ttsActive) setPresence('Interrumpiendo', 'Te escucho; corto la salida de voz y mantengo la tarea activa.');
     }
     return;
   }
@@ -542,6 +571,8 @@ async function stopPcmVoice(options = {}) {
   speechFrames = 0;
   silenceFrames = 0;
   ttsActive = false;
+  ttsPlayer.interrupt();
+  pendingTtsAudioMeta = [];
 
   captureNode?.disconnect();
   captureSource?.disconnect();
