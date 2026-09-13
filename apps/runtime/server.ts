@@ -44,9 +44,11 @@ function demoSteps(command: string): JanusStep[] {
     {
       id: 'understand',
       label: 'Entender el objetivo',
-      run: async ({ emit }) => {
+      run: async ({ emit, checkpoint }) => {
+        await checkpoint();
         await emit('tool.started', 'Analizando la solicitud', { command }, 'model');
         await sleep(300);
+        await checkpoint();
         await emit('tool.progress', 'Objetivo y contexto identificados', { percent: 100 }, 'model');
         await emit('tool.completed', 'Solicitud preparada para ejecución', {}, 'model');
       },
@@ -54,20 +56,25 @@ function demoSteps(command: string): JanusStep[] {
     {
       id: 'work',
       label: 'Ejecutar trabajo',
-      run: async ({ emit }) => {
+      run: async ({ emit, checkpoint }) => {
+        await checkpoint();
         await emit('tool.started', 'Abriendo herramientas necesarias', { tool: 'tool-gateway' }, 'tool');
         await sleep(350);
+        await checkpoint();
         await emit('tool.progress', 'Consultando fuentes / archivos', { percent: 35 }, 'tool');
         await sleep(350);
+        await checkpoint();
         await emit('tool.progress', 'Procesando resultados', { percent: 70 }, 'tool');
         await sleep(350);
+        await checkpoint();
         await emit('tool.completed', 'Trabajo de herramientas completado', { percent: 100 }, 'tool');
       },
     },
     {
       id: 'deliver',
       label: 'Preparar resultado',
-      run: async ({ emit }) => {
+      run: async ({ emit, checkpoint }) => {
+        await checkpoint();
         await emit('artifact.updated', 'Resultado actualizado y listo para mostrar', {
           preview: `Janus procesó: ${command}`,
         });
@@ -201,7 +208,7 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  const control = url.pathname.match(/^\/api\/runs\/([^/]+)\/(pause|resume)$/);
+  const control = url.pathname.match(/^\/api\/runs\/([^/]+)\/(pause|resume|cancel)$/);
   if (request.method === 'POST' && control) {
     const runner = runners.get(control[1]);
     if (!runner) {
@@ -209,7 +216,8 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (control[2] === 'pause') await runner.pause();
-    else await runner.resume();
+    if (control[2] === 'resume') await runner.resume();
+    if (control[2] === 'cancel') await runner.cancel();
     store.upsertRun(runner.snapshot());
     json(response, 200, { ok: true, snapshot: runner.snapshot() });
     return;
