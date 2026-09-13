@@ -1,6 +1,7 @@
 const activity = document.querySelector('#activity');
 const template = document.querySelector('#eventTemplate');
 const connection = document.querySelector('#connection');
+const capabilityList = document.querySelector('#capabilityList');
 const voiceButton = document.querySelector('#voiceButton');
 const presenceState = document.querySelector('#presenceState');
 const transcript = document.querySelector('#transcript');
@@ -36,9 +37,9 @@ function setPresence(state, text) {
 function detailFrom(event) {
   const payload = event.payload ?? {};
   if (typeof payload.preview === 'string') return payload.preview;
+  if (typeof payload.error === 'string') return payload.error;
   if (typeof payload.percent === 'number') return `Progreso: ${payload.percent}%`;
   if (typeof payload.tool === 'string') return `Herramienta: ${payload.tool}`;
-  if (typeof payload.error === 'string') return payload.error;
   if (typeof payload.goal === 'string') return payload.goal;
   return '';
 }
@@ -68,6 +69,7 @@ function renderEvent(event) {
     activity.innerHTML = '';
   }
 
+  const detail = detailFrom(event);
   const node = template.content.firstElementChild.cloneNode(true);
   node.dataset.state = eventState(event.type);
   node.querySelector('.event-source').textContent = `${event.source} · ${event.type}`;
@@ -77,7 +79,7 @@ function renderEvent(event) {
     second: '2-digit',
   });
   node.querySelector('.event-summary').textContent = event.summary;
-  node.querySelector('.event-detail').textContent = detailFrom(event);
+  node.querySelector('.event-detail').textContent = detail;
   activity.append(node);
   node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
@@ -103,8 +105,9 @@ function renderEvent(event) {
     setRunControls(false);
   }
   if (event.type === 'run.failed' || event.type === 'run.blocked') {
-    setPresence('Necesita atención', event.summary);
+    setPresence('Necesita atención', detail || event.summary);
     setRunControls(false);
+    void checkHealth();
   }
 }
 
@@ -123,12 +126,76 @@ function connectEvents(runId) {
   };
 }
 
+function renderCapabilities(capabilities) {
+  capabilityList.innerHTML = '';
+  if (!Array.isArray(capabilities) || capabilities.length === 0) {
+    capabilityList.textContent = 'No hay herramientas registradas.';
+    capabilityList.classList.add('capability-empty');
+    return;
+  }
+
+  capabilityList.classList.remove('capability-empty');
+  const grouped = new Map();
+  for (const item of capabilities) {
+    if (!item || typeof item.tool !== 'string' || typeof item.action !== 'string') continue;
+    const group = grouped.get(item.tool) ?? { tool: item.tool, actions: [], states: [], reasons: [] };
+    group.actions.push(item.action);
+    group.states.push(item.state);
+    if (typeof item.reason === 'string' && item.reason.trim()) group.reasons.push(item.reason.trim());
+    grouped.set(item.tool, group);
+  }
+
+  for (const group of grouped.values()) {
+    const state = aggregateCapabilityState(group.states);
+    const row = document.createElement('div');
+    row.className = 'capability-row';
+    row.dataset.state = state;
+
+    const copy = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'capability-name';
+    name.textContent = capabilityToolName(group.tool);
+    const detail = document.createElement('div');
+    detail.className = 'capability-detail';
+    detail.textContent = group.reasons[0] ?? `${group.actions.length} acción${group.actions.length === 1 ? '' : 'es'} registrada${group.actions.length === 1 ? '' : 's'}`;
+    copy.append(name, detail);
+
+    const badge = document.createElement('div');
+    badge.className = 'capability-badge';
+    badge.textContent = capabilityStateLabel(state);
+    row.append(copy, badge);
+    capabilityList.append(row);
+  }
+}
+
+function aggregateCapabilityState(states) {
+  const priority = ['disabled', 'needs_auth', 'unavailable', 'available'];
+  return priority.find((state) => states.includes(state)) ?? 'unavailable';
+}
+
+function capabilityToolName(tool) {
+  if (tool === 'google-workspace') return 'Google Workspace';
+  if (tool === 'github') return 'GitHub';
+  return tool;
+}
+
+function capabilityStateLabel(state) {
+  if (state === 'available') return 'Disponible';
+  if (state === 'needs_auth') return 'Autorizar';
+  if (state === 'disabled') return 'Desactivado';
+  return 'No disponible';
+}
+
 async function checkHealth() {
   try {
     const response = await fetch('/health', { cache: 'no-store' });
     setConnection(response.ok);
+    if (!response.ok) throw new Error('Core no disponible');
+    const health = await response.json();
+    renderCapabilities(health.capabilities);
   } catch {
     setConnection(false);
+    renderCapabilities([]);
   }
 }
 
@@ -303,7 +370,7 @@ voiceButton.addEventListener('click', () => {
 });
 
 configureSpeechRecognition();
-checkHealth();
+void checkHealth();
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
