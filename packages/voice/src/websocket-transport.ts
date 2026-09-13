@@ -63,8 +63,7 @@ export class VoiceStreamServer {
   async speak(sessionId: string, text: string, voiceId?: string): Promise<boolean> {
     const connection = this.connections.get(sessionId.trim());
     if (!connection || connection.ws.readyState !== WebSocket.OPEN) return false;
-    void voiceId;
-    await connection.engine.speak(text);
+    await connection.engine.speak(text, voiceId);
     return true;
   }
 
@@ -225,6 +224,12 @@ export class VoiceStreamServer {
   private async forwardEngineEvent(ws: WebSocket, event: DuplexVoiceEvent): Promise<void> {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (event.type === 'speech.chunk') {
+      this.sendJson(ws, {
+        type: 'speech.audio',
+        sequence: event.sequence,
+        mimeType: event.mimeType,
+        byteLength: event.bytes.byteLength,
+      });
       ws.send(event.bytes, { binary: true });
       return;
     }
