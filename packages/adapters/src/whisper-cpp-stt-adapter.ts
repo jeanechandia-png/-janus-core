@@ -150,8 +150,10 @@ export class WhisperCppSttAdapter implements SpeechToTextGateway {
   private async infer(frames: Uint8Array[], totalBytes: number): Promise<string> {
     const pcm = concatBytes(frames, totalBytes);
     const wav = pcm16MonoWav(pcm, SAMPLE_RATE);
+    const wavBuffer = new ArrayBuffer(wav.byteLength);
+    new Uint8Array(wavBuffer).set(wav);
     const form = new FormData();
-    form.set('file', new Blob([wav.buffer], { type: 'audio/wav' }), 'janus-utterance.wav');
+    form.set('file', new Blob([wavBuffer], { type: 'audio/wav' }), 'janus-utterance.wav');
     form.set('response_format', 'json');
     form.set('temperature', '0.0');
     form.set('temperature_inc', '0.2');
