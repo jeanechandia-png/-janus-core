@@ -78,7 +78,9 @@ test('Gmail search resolves list IDs into safe message metadata', async () => {
 
   assert.equal(result.ok, true);
   assert.equal(urls.length, 2);
-  assert.match(decodeURIComponent(urls[0]), /q=is:unread factura/);
+  const [listUrl] = urls;
+  assert.ok(listUrl);
+  assert.match(decodeURIComponent(listUrl), /q=is:unread factura/);
   const output = result.output as { messages?: Array<Record<string, unknown>> } | undefined;
   assert.equal(output?.messages?.[0]?.subject, 'Factura');
   assert.equal(output?.messages?.[0]?.from, 'billing@example.com');
