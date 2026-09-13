@@ -23,5 +23,9 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Typecheck
         run: npm run typecheck
+      - name: PWA syntax
+        run: |
+          node --check apps/pwa/app.js
+          node --check apps/pwa/sw.js
       - name: Tests
         run: npm test
