@@ -16,7 +16,7 @@ type JsonRecord = Record<string, unknown>;
 
 export class GitHubAdapter implements ToolAdapter {
   readonly name = 'github';
-  readonly capabilities = ['repo.get', 'contents.list', 'file.read'] as const;
+  readonly capabilities: string[] = ['repo.get', 'contents.list', 'file.read'];
 
   private readonly token?: string;
   private readonly apiBase: string;
@@ -34,7 +34,7 @@ export class GitHubAdapter implements ToolAdapter {
     request: ToolRequest,
     onProgress: (progress: ToolProgress) => void | Promise<void>,
   ): Promise<ToolResult> {
-    if (!this.capabilities.includes(request.action as (typeof this.capabilities)[number])) {
+    if (!this.capabilities.includes(request.action)) {
       return { ok: false, error: `Unsupported GitHub action: ${request.action}` };
     }
 
