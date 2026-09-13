@@ -29,3 +29,5 @@ jobs:
           node --check apps/pwa/sw.js
       - name: Tests
         run: npm test
+      - name: Runtime smoke
+        run: node tests/runtime-smoke.mjs
