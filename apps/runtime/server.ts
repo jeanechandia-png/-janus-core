@@ -6,9 +6,10 @@ import { GitHubAdapter } from '../../packages/adapters/src/github-adapter.js';
 import { EventHub } from '../../packages/core/src/event-hub.js';
 import { SqliteStore } from '../../packages/core/src/sqlite-store.js';
 import { TaskRunner, type JanusStep } from '../../packages/core/src/task-runner.js';
-import type { EventSink, JanusEventType } from '../../packages/core/src/events.js';
+import type { EventSink, JanusEventType, RunSnapshot } from '../../packages/core/src/events.js';
 import { DefaultToolGateway } from '../../packages/gateways/src/tool-gateway.js';
 import type { ToolProgress, ToolRequest, ToolResult } from '../../packages/gateways/src/contracts.js';
+import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
 
 const port = Number(process.env.PORT ?? 8787);
 const root = fileURLToPath(new URL('../pwa/', import.meta.url));
@@ -19,6 +20,13 @@ const runners = new Map<string, TaskRunner>();
 const toolGateway = new DefaultToolGateway();
 
 toolGateway.register(new GitHubAdapter({ token: process.env.GITHUB_TOKEN }));
+
+const voiceSessions = new VoiceSessionRegistry(() => ({
+  start: async (text) => startRun(text, 'voice'),
+  pause: async (runId) => controlActiveRun(runId, 'pause'),
+  resume: async (runId) => controlActiveRun(runId, 'resume'),
+  cancel: async (runId) => controlActiveRun(runId, 'cancel'),
+}));
 
 const interruptedRuns = store.markInterruptedRuns();
 hub.hydrate(store.listEvents(undefined, 500));
@@ -272,13 +280,37 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
   setTimeout(() => {
     void (async () => {
       await activeRunner.heard(inputMode);
-      await activeRunner.execute(buildSteps(command));
+      const snapshot = await activeRunner.execute(buildSteps(command));
+      finishRun(snapshot);
     })().catch((error) => {
       console.error('run failed', error);
+      voiceSessions.runBlocked(runId);
+      runners.delete(runId);
     });
   }, 25);
 
   return runId;
+}
+
+function finishRun(snapshot: RunSnapshot): void {
+  store.upsertRun(snapshot);
+  if (snapshot.status === 'blocked') voiceSessions.runBlocked(snapshot.runId);
+  if (snapshot.status === 'completed' || snapshot.status === 'cancelled' || snapshot.status === 'failed') {
+    voiceSessions.runCompleted(snapshot.runId);
+    runners.delete(snapshot.runId);
+  }
+}
+
+async function controlActiveRun(
+  runId: string,
+  action: 'pause' | 'resume' | 'cancel',
+): Promise<void> {
+  const runner = runners.get(runId);
+  if (!runner) throw new Error('run is not active in this runtime');
+  if (action === 'pause') await runner.pause();
+  if (action === 'resume') await runner.resume();
+  if (action === 'cancel') await runner.cancel();
+  store.upsertRun(runner.snapshot());
 }
 
 function handleEvents(request: IncomingMessage, response: ServerResponse): void {
@@ -340,6 +372,7 @@ const server = createServer(async (request, response) => {
       service: 'janus-runtime',
       durable: true,
       db: dbPath === ':memory:' ? 'memory' : 'sqlite',
+      voiceSessionAuthority: 'core',
       tools: {
         github: ['repo.get', 'contents.list', 'file.read'],
       },
@@ -365,6 +398,69 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/voice/utterance') {
+    const body = await readJson(request);
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!sessionId || !text) {
+      json(response, 400, { ok: false, error: 'sessionId and text are required' });
+      return;
+    }
+
+    try {
+      const session = voiceSessions.get(sessionId);
+      const result = await session.transcript({
+        text,
+        final: body.final !== false,
+        language: typeof body.language === 'string' ? body.language : undefined,
+      });
+      json(response, 200, { ok: true, result, session: session.snapshot() });
+    } catch (error) {
+      json(response, 409, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/voice/microphone') {
+    const body = await readJson(request);
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+    const state = body.state === 'connected' ? 'connected' : body.state === 'disconnected' ? 'disconnected' : null;
+    if (!sessionId || !state) {
+      json(response, 400, { ok: false, error: 'sessionId and valid state are required' });
+      return;
+    }
+    const session = voiceSessions.get(sessionId);
+    json(response, 200, { ok: true, session: session.microphone(state) });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/voice/tts') {
+    const body = await readJson(request);
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+    const state = body.state === 'started' ? 'started' : body.state === 'completed' ? 'completed' : null;
+    if (!sessionId || !state) {
+      json(response, 400, { ok: false, error: 'sessionId and valid state are required' });
+      return;
+    }
+    const session = voiceSessions.get(sessionId);
+    json(response, 200, { ok: true, session: session.tts(state) });
+    return;
+  }
+
+  const voiceSessionMatch = url.pathname.match(/^\/api\/voice\/sessions\/([^/]+)$/);
+  const voiceSessionId = voiceSessionMatch?.[1];
+  if (request.method === 'GET' && voiceSessionId) {
+    try {
+      json(response, 200, { ok: true, session: voiceSessions.get(decodeURIComponent(voiceSessionId)).snapshot() });
+    } catch (error) {
+      json(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
   const getRun = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
   const requestedRunId = getRun?.[1];
   if (request.method === 'GET' && requestedRunId) {
@@ -382,16 +478,12 @@ const server = createServer(async (request, response) => {
   const controlRunId = control?.[1];
   const controlAction = control?.[2];
   if (request.method === 'POST' && controlRunId && controlAction) {
-    const runner = runners.get(controlRunId);
-    if (!runner) {
-      json(response, 409, { ok: false, error: 'run is not active in this runtime' });
-      return;
+    try {
+      await controlActiveRun(controlRunId, controlAction as 'pause' | 'resume' | 'cancel');
+      json(response, 200, { ok: true, snapshot: runners.get(controlRunId)?.snapshot() ?? store.getRun(controlRunId) });
+    } catch (error) {
+      json(response, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
-    if (controlAction === 'pause') await runner.pause();
-    if (controlAction === 'resume') await runner.resume();
-    if (controlAction === 'cancel') await runner.cancel();
-    store.upsertRun(runner.snapshot());
-    json(response, 200, { ok: true, snapshot: runner.snapshot() });
     return;
   }
 
