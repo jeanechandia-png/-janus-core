@@ -7,6 +7,7 @@ import type {
 
 export interface GitHubAdapterOptions {
   token?: string;
+  tokenProvider?: () => Promise<string | undefined>;
   apiBase?: string;
   fetchImpl?: typeof fetch;
   userAgent?: string;
@@ -19,12 +20,14 @@ export class GitHubAdapter implements ToolAdapter {
   readonly capabilities: string[] = ['repo.get', 'contents.list', 'file.read'];
 
   private readonly token?: string;
+  private readonly tokenProvider?: () => Promise<string | undefined>;
   private readonly apiBase: string;
   private readonly fetchImpl: typeof fetch;
   private readonly userAgent: string;
 
   constructor(options: GitHubAdapterOptions = {}) {
     this.token = options.token;
+    this.tokenProvider = options.tokenProvider;
     this.apiBase = (options.apiBase ?? 'https://api.github.com').replace(/\/$/, '');
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.userAgent = options.userAgent ?? 'janus-core/0.1';
@@ -139,7 +142,8 @@ export class GitHubAdapter implements ToolAdapter {
       'x-github-api-version': '2022-11-28',
       'user-agent': this.userAgent,
     };
-    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const token = (this.tokenProvider ? await this.tokenProvider() : this.token)?.trim();
+    if (token) headers.authorization = `Bearer ${token}`;
 
     let response: Response;
     try {
