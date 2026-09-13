@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventHub } from '../packages/core/src/event-hub.js';
 import { TaskRunner } from '../packages/core/src/task-runner.js';
+import type { JanusEventType } from '../packages/core/src/events.js';
 
 test('voice run stays observable from heard to completed', async () => {
   const hub = new EventHub();
@@ -29,7 +30,7 @@ test('voice run stays observable from heard to completed', async () => {
 
   assert.equal(snapshot.status, 'completed');
   const types = hub.replay(snapshot.runId).map((event) => event.type);
-  for (const expected of [
+  const expected: JanusEventType[] = [
     'run.heard',
     'run.started',
     'tool.started',
@@ -37,8 +38,9 @@ test('voice run stays observable from heard to completed', async () => {
     'tool.completed',
     'artifact.updated',
     'run.completed',
-  ]) {
-    assert.ok(types.includes(expected), `missing ${expected}`);
+  ];
+  for (const type of expected) {
+    assert.ok(types.includes(type), `missing ${type}`);
   }
 });
 
