@@ -5,8 +5,11 @@ export type EventSubscriber = (event: JanusEvent) => void;
 export class EventHub {
   private readonly history: JanusEvent[] = [];
   private readonly subscribers = new Set<EventSubscriber>();
+  private readonly maxHistory: number;
 
-  constructor(private readonly maxHistory = 500) {}
+  constructor(maxHistory = 500) {
+    this.maxHistory = maxHistory;
+  }
 
   readonly sink: EventSink = async (event) => {
     this.history.push(event);
