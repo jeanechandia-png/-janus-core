@@ -58,6 +58,7 @@ function compileToolStep(step: PlannedToolStep, options: CompilePlanOptions): Ja
       await emit('artifact.updated', `${step.label} — resultado disponible`, {
         tool: step.tool,
         action: step.action,
+        preview: summarizeResult(step, result),
         result: compactResult(result, options.maxResultPayloadChars ?? 12_000),
       }, 'tool');
     },
@@ -78,6 +79,29 @@ function describeTarget(input: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+function summarizeResult(step: PlannedToolStep, result: ToolResult): string {
+  const output = result.output ?? {};
+  if (step.tool === 'github' && step.action === 'repo.get') {
+    const fullName = stringValue(output.fullName) ?? `${stringValue(output.owner) ?? ''}/${stringValue(output.repo) ?? ''}`;
+    const visibility = output.private === true ? 'privado' : 'público';
+    const branch = stringValue(output.defaultBranch) ?? 'rama desconocida';
+    return `${fullName} · ${visibility} · ${branch}`;
+  }
+  if (step.tool === 'github' && step.action === 'contents.list') {
+    const entries = Array.isArray(output.entries) ? output.entries.length : 0;
+    const path = stringValue(output.path) || 'raíz';
+    return `${entries} entradas encontradas en ${path}.`;
+  }
+  if (step.tool === 'github' && step.action === 'file.read') {
+    const path = stringValue(output.path) ?? 'archivo';
+    const content = stringValue(output.content) ?? '';
+    return `${path} leído · ${content.length} caracteres.`;
+  }
+  return result.externalReference
+    ? `${step.label} completado · ${result.externalReference}`
+    : `${step.label} completado.`;
+}
+
 function compactResult(result: ToolResult, maxChars: number): Record<string, unknown> {
   const safe: Record<string, unknown> = {
     ok: result.ok,
@@ -95,4 +119,8 @@ function compactResult(result: ToolResult, maxChars: number): Record<string, unk
   safe.truncated = true;
   safe.originalChars = serialized.length;
   return safe;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
