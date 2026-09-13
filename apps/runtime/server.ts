@@ -10,7 +10,7 @@ import { TaskRunner, type JanusStep } from '../../packages/core/src/task-runner.
 import { DefaultToolGateway } from '../../packages/gateways/src/tool-gateway.js';
 import { compilePlan } from '../../packages/orchestrator/src/compile-plan.js';
 import { deterministicPlan } from '../../packages/orchestrator/src/deterministic-planner.js';
-import { validatePlan, type JanusPlan } from '../../packages/orchestrator/src/plan.js';
+import { validatePlan } from '../../packages/orchestrator/src/plan.js';
 import { VoiceSessionRegistry } from '../../packages/voice/src/registry.js';
 
 const port = Number(process.env.PORT ?? 8787);
@@ -90,7 +90,7 @@ function demoSteps(command: string): JanusStep[] {
   ];
 }
 
-function preparePlan(command: string): { plan: JanusPlan; steps: JanusStep[] } | null {
+function prepareSteps(command: string): JanusStep[] | null {
   const plan = deterministicPlan(command);
   if (!plan) return null;
 
@@ -103,10 +103,7 @@ function preparePlan(command: string): { plan: JanusPlan; steps: JanusStep[] } |
     throw new Error(`Plan rejected by Janus Core: ${validation.errors.join('; ')}`);
   }
 
-  return {
-    plan,
-    steps: compilePlan(plan, { toolGateway }),
-  };
+  return compilePlan(plan, { toolGateway });
 }
 
 function startRun(command: string, inputMode: 'voice' | 'text'): string {
@@ -138,26 +135,7 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
 
       let steps: JanusStep[];
       try {
-        const prepared = preparePlan(command);
-        if (prepared) {
-          await durableSink({
-            id: `evt_plan_${crypto.randomUUID()}`,
-            runId,
-            seq: activeRunner.snapshot().lastEventSeq + 1,
-            type: 'artifact.updated',
-            at: new Date().toISOString(),
-            source: 'core',
-            summary: 'Plan validado por Janus Core',
-            payload: {
-              preview: `${prepared.plan.steps.length} pasos autorizados · fuente ${prepared.plan.source}`,
-              planVersion: prepared.plan.version,
-              source: prepared.plan.source,
-            },
-          });
-          steps = prepared.steps;
-        } else {
-          steps = demoSteps(command);
-        }
+        steps = prepareSteps(command) ?? demoSteps(command);
       } catch (error) {
         await activeRunner.block('Janus Core rechazó el plan antes de ejecutar herramientas', {
           error: error instanceof Error ? error.message : String(error),
@@ -168,7 +146,7 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
 
       const snapshot = await activeRunner.execute(steps);
       finishRun(snapshot);
-    })().catch(async (error) => {
+    })().catch((error) => {
       console.error('run failed', error);
       voiceSessions.runBlocked(runId);
       runners.delete(runId);
@@ -180,7 +158,11 @@ function startRun(command: string, inputMode: 'voice' | 'text'): string {
 
 function finishRun(snapshot: RunSnapshot): void {
   store.upsertRun(snapshot);
-  if (snapshot.status === 'blocked') voiceSessions.runBlocked(snapshot.runId);
+  if (snapshot.status === 'blocked') {
+    voiceSessions.runBlocked(snapshot.runId);
+    runners.delete(snapshot.runId);
+    return;
+  }
   if (snapshot.status === 'completed' || snapshot.status === 'cancelled' || snapshot.status === 'failed') {
     voiceSessions.runCompleted(snapshot.runId);
     runners.delete(snapshot.runId);
