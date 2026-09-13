@@ -56,6 +56,7 @@ export class DuplexVoiceEngine {
   private transcriptionTask?: Promise<void>;
   private synthesisGeneration = 0;
   private synthesisActive = false;
+  private lastInterruptReason = 'barge-in';
   private stopped = false;
 
   constructor(options: DuplexVoiceEngineOptions) {
@@ -95,6 +96,7 @@ export class DuplexVoiceEngine {
     if (!clean) return;
 
     const generation = ++this.synthesisGeneration;
+    this.lastInterruptReason = 'barge-in';
     this.synthesisActive = true;
     this.session.tts('started');
     await this.onEvent({ type: 'speech.started', text: clean, voiceId });
@@ -149,7 +151,7 @@ export class DuplexVoiceEngine {
     if (interrupted || generation !== this.synthesisGeneration || this.stopped) {
       await this.onEvent({
         type: 'speech.interrupted',
-        reason: this.stopped ? 'session-stopped' : 'barge-in',
+        reason: this.stopped ? 'session-stopped' : this.lastInterruptReason,
         chunks,
       });
       return;
@@ -160,16 +162,16 @@ export class DuplexVoiceEngine {
 
   interruptSpeech(reason = 'barge-in'): void {
     if (!this.synthesisActive) return;
+    this.lastInterruptReason = reason;
     this.synthesisGeneration += 1;
     this.synthesisActive = false;
     this.session.tts('completed');
-    void reason;
   }
 
   async stop(): Promise<void> {
     if (this.stopped) return;
-    this.stopped = true;
     this.interruptSpeech('session-stopped');
+    this.stopped = true;
     this.input.end();
     this.session.microphone('disconnected');
     await this.transcriptionTask;
