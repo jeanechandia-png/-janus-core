@@ -33,6 +33,14 @@ export class VoiceSessionRegistry {
     return [...this.sessions.values()].map((session) => session.snapshot());
   }
 
+  sessionIdForRun(runId: string): string | undefined {
+    for (const session of this.sessions.values()) {
+      const snapshot = session.snapshot();
+      if (snapshot.activeRunId === runId) return snapshot.sessionId;
+    }
+    return undefined;
+  }
+
   runCompleted(runId: string): void {
     for (const session of this.sessions.values()) session.runCompleted(runId);
   }
