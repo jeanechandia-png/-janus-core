@@ -2,6 +2,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+!.env.voice.example
 data/
 *.db
 *.db-shm
@@ -10,3 +11,8 @@ data/
 coverage/
 dist/
 *.log
+.venv/
+.venv-*/
+models/
+voices/private/
+config/voices.local.json
