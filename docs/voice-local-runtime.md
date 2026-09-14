@@ -21,7 +21,7 @@ Keep all of the following outside Git:
 - `.env.voice.local`
 - virtual environments
 
-The repository `.gitignore` already excludes these locations. Do not store tokens or secrets in voice config JSON.
+The repository `.gitignore` excludes these locations. Do not store tokens or secrets in voice config JSON.
 
 ## 1. whisper.cpp
 
@@ -37,16 +37,9 @@ cd whisper.cpp
 cmake -B build
 cmake --build build -j --config Release
 sh ./models/download-ggml-model.sh small
-./build/bin/whisper-server --host 127.0.0.1 --no-timestamps -m ./models/ggml-small.bin
 ```
 
-Janus expects the default local server endpoint at:
-
-```text
-http://127.0.0.1:8080
-```
-
-`--no-timestamps` is intentional: current whisper.cpp server versions can otherwise insert unwanted line wrapping in normal text output when token timestamps are enabled.
+The Janus supervisor starts `whisper-server` itself from the paths in `.env.voice.local`, binding it to the loopback endpoint configured by `JANUS_STT_BASE_URL` (default example: `http://127.0.0.1:8080`). It also enables `--no-timestamps` so normal transcript text is not affected by token-timestamp line wrapping.
 
 ## 2. Qwen3-TTS
 
@@ -89,34 +82,44 @@ Rules:
 - Do not use remote URLs for clone audio.
 - Do not enable remote model IDs or remote bind unless explicitly approved.
 
-## 4. Start Qwen sidecar
+## 4. Configure the supervised stack
 
-With the Python environment active:
-
-```bash
-export JANUS_QWEN_VOICE_CONFIG=/absolute/path/janus-core/config/voices.local.json
-export JANUS_QWEN_HOST=127.0.0.1
-export JANUS_QWEN_PORT=8090
-python sidecars/qwen3_tts_server.py
-```
-
-Health check:
-
-```text
-GET http://127.0.0.1:8090/health
-```
-
-The sidecar loads models lazily and returns typed PCM16 audio. It binds to loopback by default.
-
-## 5. Start Janus Core with both local adapters
-
-Copy `.env.voice.example` to `.env.voice.local` and set the local absolute paths and approved voice ID. Load those variables in the shell, then run:
+Create the private environment file:
 
 ```bash
-npm start
+cp .env.voice.example .env.voice.local
 ```
 
-Expected `/health` state:
+Set the real absolute local paths for:
+
+- `WHISPER_SERVER_BIN`
+- `WHISPER_MODEL`
+- `JANUS_QWEN_PYTHON`
+- `JANUS_QWEN_VOICE_CONFIG`
+- the approved `JANUS_VOICE_ID`
+
+Keep the STT and TTS URLs on loopback. The supervisor rejects non-loopback adapter URLs instead of silently exposing local voice services to the network.
+
+## 5. Canonical startup
+
+Start the entire local voice stack from the repository root:
+
+```bash
+npm run voice:start
+```
+
+The supervisor performs these gates in order:
+
+1. Validate local binary/model/config/reference paths.
+2. Validate the selected voice exists in the private voice config.
+3. Start `whisper-server` and wait for its local TCP endpoint.
+4. Start the Qwen sidecar and wait for `/health`.
+5. Start Janus Core and wait for `/health`.
+6. Refuse to declare ready unless `voice.streaming.state` is `available`.
+
+Ctrl+C shuts down Janus Core, Qwen and Whisper as one stack. The supervisor does not download models, enable remote binding, or persist secrets.
+
+Expected final health state:
 
 ```json
 {
@@ -128,6 +131,19 @@ Expected `/health` state:
   }
 }
 ```
+
+### Manual startup is diagnostic only
+
+When isolating a problem, each component can still be started independently. For example, the Qwen sidecar can be run with:
+
+```bash
+export JANUS_QWEN_VOICE_CONFIG=/absolute/path/janus-core/config/voices.local.json
+export JANUS_QWEN_HOST=127.0.0.1
+export JANUS_QWEN_PORT=8090
+/absolute/path/janus-core/.venv-qwen/bin/python sidecars/qwen3_tts_server.py
+```
+
+Its health endpoint is `GET http://127.0.0.1:8090/health`. Normal daily operation should use the supervisor instead so readiness and shutdown ordering remain deterministic.
 
 ## 6. Acceptance gate on the physical host
 
