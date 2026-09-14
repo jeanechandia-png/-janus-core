@@ -173,11 +173,11 @@ function pcmFrame(amplitude: number, samples: number): Buffer {
   return buffer;
 }
 
-async function readRequestBytes(request: NodeJS.AsyncIterable<Uint8Array | Buffer>): Promise<Buffer> {
+async function readRequestBytes(request: AsyncIterable<Uint8Array | Buffer>): Promise<Buffer> {
   return Buffer.concat(await readRequestChunks(request));
 }
 
-async function readRequestChunks(request: NodeJS.AsyncIterable<Uint8Array | Buffer>): Promise<Buffer[]> {
+async function readRequestChunks(request: AsyncIterable<Uint8Array | Buffer>): Promise<Buffer[]> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   return chunks;
