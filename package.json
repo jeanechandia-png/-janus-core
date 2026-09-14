@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node --import tsx apps/runtime/server.ts",
+    "voice:start": "node scripts/start-local-voice.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "demo": "node --import tsx examples/observable-run.ts"
