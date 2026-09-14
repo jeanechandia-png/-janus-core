@@ -52,31 +52,32 @@ test('runtime full-duplex path carries PCM through local STT, run execution, saf
   runtime.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
   runtime.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
-  const ws = new WebSocket(`ws://127.0.0.1:${runtimePort}/api/voice/stream`);
+  let ws: WebSocket | undefined;
   const jsonMessages: Array<Record<string, any>> = [];
   const receivedBinary: Buffer[] = [];
   const ordered: Array<{ kind: 'json'; type: string; sequence?: number } | { kind: 'binary'; bytes: number }> = [];
-
-  ws.on('message', (data, isBinary) => {
-    if (isBinary) {
-      const bytes = Buffer.from(data as Buffer);
-      receivedBinary.push(bytes);
-      ordered.push({ kind: 'binary', bytes: bytes.byteLength });
-      return;
-    }
-    const message = JSON.parse(data.toString()) as Record<string, any>;
-    jsonMessages.push(message);
-    ordered.push({
-      kind: 'json',
-      type: String(message.type ?? ''),
-      ...(typeof message.sequence === 'number' ? { sequence: message.sequence } : {}),
-    });
-  });
 
   try {
     const health = await waitForJson(`http://127.0.0.1:${runtimePort}/health`, 8_000);
     assert.equal(health.voice?.streaming?.state, 'available');
     assert.equal(health.voice?.streaming?.transport, 'websocket');
+
+    ws = new WebSocket(`ws://127.0.0.1:${runtimePort}/api/voice/stream`);
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        const bytes = Buffer.from(data as Buffer);
+        receivedBinary.push(bytes);
+        ordered.push({ kind: 'binary', bytes: bytes.byteLength });
+        return;
+      }
+      const message = JSON.parse(data.toString()) as Record<string, any>;
+      jsonMessages.push(message);
+      ordered.push({
+        kind: 'json',
+        type: String(message.type ?? ''),
+        ...(typeof message.sequence === 'number' ? { sequence: message.sequence } : {}),
+      });
+    });
 
     await waitForSocketOpen(ws, 5_000);
     ws.send(JSON.stringify({
@@ -136,7 +137,7 @@ test('runtime full-duplex path carries PCM through local STT, run execution, saf
     if (stderr) console.error('--- runtime stderr ---\n' + stderr);
     throw error;
   } finally {
-    ws.close();
+    ws?.close();
     await stopChild(runtime);
     await Promise.all([close(stt), close(tts)]);
   }
